@@ -1,0 +1,41 @@
+[project]
+name = "logparser"
+version = "0.1.0"
+description = "5G/4G UE log parser and GUI visualization (QCAT-style)"
+requires-python = ">=3.10"
+dependencies = [
+    "pycrate>=0.7",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.5",
+]
+gui-pyqt = [
+    "PyQt6>=6.5",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-qt>=4.2",
+    "mypy>=1.0",
+    "ruff>=0.1",
+]
+export = [
+    "scapy>=2.5",
+]
+
+[project.scripts]
+logparser = "logparser.app:main"
+logparser-cli = "logparser.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

@@ -1,0 +1,83 @@
+{
+  "timers": [
+    {
+      "id": "T300",
+      "start_msg": "rrcSetupRequest",
+      "stop_msg": "rrcSetup",
+      "fail_msg": "rrcReject",
+      "timeout_ms": 2000,
+      "severity": "FAILURE",
+      "description": "RRC Connection Establishment Failure"
+    },
+    {
+      "id": "T304",
+      "start_msg": "reconfigurationWithSync",
+      "stop_msg": "rrcReconfigurationComplete",
+      "fail_msg": null,
+      "timeout_ms": 500,
+      "severity": "FAILURE",
+      "description": "Handover Failure (Sync to target cell failed)"
+    },
+    {
+      "id": "T311",
+      "start_msg": "rrcReestablishmentRequest",
+      "stop_msg": "rrcReestablishment",
+      "fail_msg": "rrcReestablishmentReject",
+      "timeout_ms": 3000,
+      "severity": "FAILURE",
+      "description": "RRC Re-establishment Failure (Call Drop)"
+    },
+    {
+      "id": "T350",
+      "start_msg": "registrationRequest",
+      "stop_msg": "registrationAccept",
+      "fail_msg": "registrationReject",
+      "timeout_ms": 15000,
+      "severity": "FAILURE",
+      "description": "5G Registration Failure"
+    },
+    {
+      "id": "T3510",
+      "start_msg": "serviceRequest",
+      "stop_msg": "serviceAccept",
+      "fail_msg": "serviceReject",
+      "timeout_ms": 6000,
+      "severity": "FAILURE",
+      "description": "5G Service Request Failure"
+    }
+  ],
+  "reject_messages": [
+    "rrcReject",
+    "rrcReestablishmentReject",
+    "registrationReject",
+    "serviceReject",
+    "securityModeReject",
+    "deregistrationAccept",
+    "pduSessionReleaseCommand",
+    "rrcConnectionReject",
+    "Status: 403",
+    "Status: 486",
+    "Status: 487",
+    "Status: 488",
+    "Status: 503",
+    "Status: 504",
+    "Status: 580",
+    "Status: 600",
+    "Status: 603"
+  ],
+  "warning_messages": [
+    "rrcReestablishmentRequest",
+    "rrcRelease",
+    "rrcConnectionRelease",
+    "Status: 408",
+    "BYE"
+  ],
+  "critical_ies": [
+    "5gmm_cause",
+    "waitTime",
+    "establishmentCause",
+    "reestablishmentCause",
+    "deprioritisationReq",
+    "redirectedCarrierInfo"
+  ]
+}

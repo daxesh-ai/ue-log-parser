@@ -1,0 +1,147 @@
+/* Dark theme for 5G/4G Log Parser */
+
+QMainWindow, QWidget {
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+}
+
+QTableView, QTreeView {
+    background-color: #252525;
+    alternate-background-color: #2d2d2d;
+    color: #e0e0e0;
+    gridline-color: #3a3a3a;
+    selection-background-color: #0066cc;
+    selection-color: #ffffff;
+    border: 1px solid #3a3a3a;
+}
+
+QTableView::item, QTreeView::item {
+    padding: 2px 4px;
+}
+
+QHeaderView::section {
+    background-color: #333333;
+    color: #cccccc;
+    border: 1px solid #444444;
+    padding: 4px;
+    font-weight: bold;
+}
+
+QSplitter::handle {
+    background-color: #444444;
+}
+
+QToolBar, QMenuBar {
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border-bottom: 1px solid #444;
+}
+
+QMenuBar::item:selected {
+    background-color: #0066cc;
+}
+
+QMenu {
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    border: 1px solid #444;
+}
+
+QMenu::item:selected {
+    background-color: #0066cc;
+}
+
+QPushButton {
+    background-color: #3a3a3a;
+    color: #e0e0e0;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 12px;
+}
+
+QPushButton:hover {
+    background-color: #4a4a4a;
+}
+
+QComboBox {
+    background-color: #333;
+    color: #e0e0e0;
+    border: 1px solid #555;
+    border-radius: 3px;
+    padding: 2px 8px;
+}
+
+QComboBox:drop-down {
+    border: none;
+}
+
+QLabel {
+    color: #cccccc;
+}
+
+QProgressBar {
+    background-color: #333;
+    border: 1px solid #555;
+    border-radius: 3px;
+    text-align: center;
+    color: #fff;
+}
+
+QProgressBar::chunk {
+    background-color: #0066cc;
+}
+
+QStatusBar {
+    background-color: #252525;
+    color: #aaa;
+}
+
+QTabWidget::pane {
+    border: 1px solid #444;
+}
+
+QTabBar::tab {
+    background-color: #333;
+    color: #ccc;
+    padding: 6px 16px;
+    border: 1px solid #444;
+    border-bottom: none;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #1e1e1e;
+    color: #fff;
+    border-bottom: 2px solid #0066cc;
+}
+
+QGraphicsView {
+    background-color: #1e1e1e;
+    border: 1px solid #3a3a3a;
+}
+
+QFrame {
+    border-color: #444;
+}
+
+QScrollBar:vertical {
+    background-color: #252525;
+    width: 12px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #555;
+    border-radius: 4px;
+    min-height: 20px;
+}
+
+QScrollBar:horizontal {
+    background-color: #252525;
+    height: 12px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #555;
+    border-radius: 4px;
+    min-width: 20px;
+}
