@@ -68,28 +68,29 @@ def decode_mac_dl_tb(payload: bytes, timestamp: datetime) -> MacDlTbSample | Non
 def decode_mac_ul_tb(payload: bytes, timestamp: datetime) -> MacUlTbSample | None:
     """Decode a 0xB8A1 UL TB packet.
 
-    Same header layout as DL but per-record is 72 bytes.
+    Header: 20 bytes. u32@12 = num_sub_PDUs (variable-length records).
+    Unlike DL (fixed 144-byte records), UL records are variable-length
+    so MCS cannot be reliably extracted from a fixed byte offset.
+    We extract the sub-PDU count and total data length as UL activity proxy.
     """
-    if len(payload) < 28:
+    if len(payload) < 24:
         return None
 
     if payload[0] != 1:
         return None
 
-    tb_total_bytes = struct.unpack_from("<I", payload, 12)[0]
-    num_records = (len(payload) - 20) // 72
-
-    if num_records <= 0:
+    num_sub_pdus = struct.unpack_from("<I", payload, 12)[0]
+    if num_sub_pdus == 0 or num_sub_pdus > 100:
         return None
 
-    # MCS at same relative position within record
-    mcs = payload[34] if len(payload) > 34 else 0
-    if mcs > 31:
-        mcs = 0
+    # Total UL data bytes = payload length - header
+    ul_data_bytes = len(payload) - 20
 
+    # MCS not reliably extractable from variable-length UL records
+    # Use -1 to indicate "unknown"
     return MacUlTbSample(
         timestamp=timestamp,
-        mcs=mcs,
-        tb_size=tb_total_bytes,
-        num_slots=num_records,
+        mcs=-1,   # Unknown for variable-length UL records
+        tb_size=ul_data_bytes,
+        num_slots=num_sub_pdus,
     )
