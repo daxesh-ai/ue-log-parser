@@ -132,7 +132,7 @@ def load_file(
     phy_mac_packets: list[DiagPacket] = []
 
     _PHY_MAC_CODES = {0xB883, 0xB8D1, 0xB884, 0xB885, 0xB8C9, 0xB8A1,
-                      0x1874, 0x1CE2, 0xB896}
+                      0x1874, 0x1CE2, 0xB896, 0xB8A7}
     _MAC_CE_CODE = 0xB887
 
     packet_count = 0
@@ -387,10 +387,12 @@ def _load_phy_mac_data_from_packets(packets: list, session: LogSession) -> None:
     from .decoders.nr_mac import decode_mac_dl_tb, decode_mac_ul_tb
     from .decoders.nr_rlc import decode_rlc_dl_stats
     from .decoders.nr_pdcp import decode_pdcp_throughput
+    from .decoders.nr_ul_power import decode_ul_power_config
 
     phy_samples = []
     cqi_samples = []
     beam_samples = []
+    ul_power = []
     mac_dl = []
     mac_ul = []
     rlc_stats = []
@@ -421,6 +423,10 @@ def _load_phy_mac_data_from_packets(packets: list, session: LogSession) -> None:
             s = decode_harq_feedback(packet.payload, packet.timestamp)
             if s:
                 harq_samples.append(s)
+        elif code == 0xB8A7:
+            s = decode_ul_power_config(packet.payload, packet.timestamp)
+            if s:
+                ul_power.append(s)
         elif code == 0x1874:
             s = decode_rlc_dl_stats(packet.payload, packet.timestamp)
             if s:
@@ -443,6 +449,7 @@ def _load_phy_mac_data_from_packets(packets: list, session: LogSession) -> None:
     session.rlc_dl_stats = rlc_stats
     session.pdcp_samples = pdcp_samples
     session.harq_samples = harq_samples
+    session.ul_power_config = ul_power
 
 
 # Legacy wrappers (kept for backward compat with load_files multi-file merge)

@@ -62,6 +62,7 @@ def analyze_session(session: LogSession) -> list[Recommendation]:
     _check_deprioritisation(session, recommendations)
     _check_security_mode_failures(session, recommendations)
     _check_pci_mod3_conflicts(session, recommendations)
+    _check_ul_power_limited(session, recommendations)
     _check_measurement_gaps(session, recommendations)
 
     # Sort by severity then count
@@ -1148,6 +1149,72 @@ def _check_security_mode_failures(session: LogSession, recs: list):
                 "4. Review UE capability for algorithm support"
             ),
             parameter="cipheringAlgorithm, integrityProtAlgorithm, SecurityAlgorithmConfig",
+        ))
+
+
+def _check_ul_power_limited(session: LogSession, recs: list):
+    """Detect UE uplink power-limited scenarios.
+
+    When Pcmax is low (power class restriction) or UL MCS drops while
+    DL RSRP is still good, the UE may be at cell edge for uplink only.
+    Also flags if FR2 Pcmax < 20 dBm (unexpected for Power Class 3).
+    """
+    ul_power = getattr(session, "ul_power_config", [])
+    mac_ul = getattr(session, "mac_ul_samples", [])
+
+    if not ul_power:
+        return
+
+    # Check for FR2 Pcmax=0 (mmWave module off) or FR1 significantly below 23
+    low_power_events = [p for p in ul_power if p.pcmax_fr2_dbm == 0 or p.pcmax_fr1_dbm < 15]
+
+    # Check for UL MCS degradation (MCS 0 = max power, retransmission)
+    ul_mcs0_count = sum(1 for s in mac_ul if s.mcs == 0)
+    ul_total = len(mac_ul)
+    ul_mcs0_pct = (ul_mcs0_count / max(1, ul_total)) * 100
+
+    # Combine: if low Pcmax + high UL MCS-0 → power limited
+    if low_power_events:
+        recs.append(Recommendation(
+            rank=0, category="RRC",
+            issue=f"UL Power Restricted — Pcmax below normal ({len(low_power_events)}x)",
+            severity="Major",
+            count=len(low_power_events),
+            msg_indices=[session.messages[0].index] if session.messages else [],
+            root_cause=(
+                f"UL power control config shows Pcmax below normal levels "
+                f"(FR1: {ul_power[0].pcmax_fr1_dbm} dBm, FR2: {ul_power[0].pcmax_fr2_dbm} dBm). "
+                f"Normal Power Class 3: FR1=23 dBm, FR2=20 dBm. "
+                f"Low Pcmax reduces UL coverage radius and causes UL throughput drops."
+            ),
+            recommendation=(
+                "1. Check SAR (Specific Absorption Rate) restrictions — hand/head proximity reduces Pcmax\n"
+                "2. Verify P-Max from SIB1 is not artificially limiting UE power\n"
+                "3. Check for thermal throttling reducing max Tx power\n"
+                "4. If FR2 Pcmax < 20: antenna module may be disabled (thermal/grip)"
+            ),
+            parameter="Pcmax, P-Max-SIB1, SAR-backoff, thermalMitigation",
+        ))
+    elif ul_mcs0_pct > 15 and ul_total > 100:
+        recs.append(Recommendation(
+            rank=0, category="RRC",
+            issue=f"UL Quality Degradation — {ul_mcs0_pct:.1f}% UL MCS-0",
+            severity="Major" if ul_mcs0_pct > 30 else "Minor",
+            count=ul_mcs0_count,
+            msg_indices=[session.messages[0].index] if session.messages else [],
+            root_cause=(
+                f"UL MAC shows {ul_mcs0_pct:.1f}% MCS-0 transmissions ({ul_mcs0_count:,}/{ul_total:,}). "
+                f"While Pcmax appears normal ({ul_power[0].pcmax_fr1_dbm}/{ul_power[0].pcmax_fr2_dbm} dBm), "
+                f"the high UL error rate suggests the UE is at uplink coverage edge "
+                f"or experiencing UL interference."
+            ),
+            recommendation=(
+                "1. Check UL SINR at gNB receiver — UE signal may be drowned by interference\n"
+                "2. Verify TPC (Transmit Power Control) is converging — check power ramp\n"
+                "3. If at cell edge: reduce UL BLER target or add UL coverage solutions\n"
+                "4. Check for UL pilot pollution from neighboring cells"
+            ),
+            parameter="UL-BLER-target, TPC-accumulation, P0-PUSCH, alpha",
         ))
 
 

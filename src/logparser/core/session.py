@@ -27,6 +27,8 @@ class LogSession:
     pdcp_samples: list = field(default_factory=list)
     # DL HARQ ACK/NACK feedback (BLER) from 0xB896
     harq_samples: list = field(default_factory=list)
+    # UL power control config from 0xB8A7
+    ul_power_config: list = field(default_factory=list)
     # Source file names (for multi-file sessions)
     source_files: list = field(default_factory=list)
 
