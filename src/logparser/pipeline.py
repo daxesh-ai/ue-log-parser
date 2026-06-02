@@ -237,6 +237,7 @@ def load_file(
     engine.analyze(session)
 
     _apply_tech_tracking(session)
+    _apply_bearer_tracking(session)
     return session
 
 
@@ -544,3 +545,21 @@ def _apply_tech_tracking(session: LogSession) -> None:
                 msg.info = f"Call End | {msg.info}" if msg.info else "Call End"
             elif event.event_type == "fail":
                 msg.info = f"Call FAILED | {msg.info}" if msg.info else "Call FAILED"
+
+def _apply_bearer_tracking(session: LogSession) -> None:
+    """Build bearer events and annotate messages with QCI/5QI info."""
+    from .analysis.bearer_tracker import build_bearer_events, format_qci
+
+    events = build_bearer_events(session)
+    session.bearer_events = events
+
+    # Annotate messages with bearer info
+    for event in events:
+        if event.msg_index < len(session.messages):
+            msg = session.messages[event.msg_index]
+            if event.qci_5qi > 0:
+                qci_str = format_qci(event.qci_5qi)
+                if msg.info:
+                    msg.info = f"{qci_str} | {msg.info}"
+                else:
+                    msg.info = qci_str

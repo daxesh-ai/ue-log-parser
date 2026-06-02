@@ -57,6 +57,10 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
             "-e", "s1ap.procedureCode",  # 18
             "-e", "diameter.cmd.code",   # 19
             "-e", "sip.P-Access-Network-Info",  # 20
+            "-e", "s1ap.e_RAB_ID",       # 21
+            "-e", "s1ap.radioNetwork",   # 22
+            "-e", "ngap.procedureCode",  # 23
+            "-e", "ngap.Cause",          # 24
             "-E", "separator=\t",
             "-E", "quote=n",
             "-E", "occurrence=f",
@@ -109,6 +113,10 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
         s1ap_proc = _get(18)
         diameter_cmd = _get(19)
         p_access_net_info = _get(20)
+        s1ap_erab_id = _get(21)
+        s1ap_radio_cause = _get(22)
+        ngap_proc = _get(23)
+        ngap_cause = _get(24)
 
         # Use IPv6 if IPv4 not available
         if not src:
@@ -146,7 +154,9 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
         elif "PFCP" in proto_col:
             info = _build_pfcp_info(pfcp_type, pfcp_cause)
         elif "S1AP" in proto_col:
-            info = _build_s1ap_info(s1ap_proc, info_col)
+            info = _build_s1ap_info(s1ap_proc, info_col, s1ap_erab_id, s1ap_radio_cause)
+        elif "NGAP" in proto_col:
+            info = _build_ngap_info(ngap_proc, info_col, ngap_cause)
         elif "GTP" in proto_col and "SIP" not in proto_col:
             info = _build_gtp_info(gtpv2_type, gtpv2_cause)
         elif "Diameter" in proto_col:
@@ -343,18 +353,73 @@ def _build_pfcp_info(pfcp_type: str, pfcp_cause: str) -> str:
     return ""
 
 
-def _build_s1ap_info(s1ap_proc: str, info_col: str) -> str:
-    """Build info for S1AP messages."""
-    # Extract cause from info column
-    if "cause=" in info_col.lower():
-        cause_start = info_col.lower().index("cause=")
-        cause = info_col[cause_start:].split("]")[0].split(",")[0]
-        return cause.replace("cause=", "").strip()
-    elif "cause" in info_col.lower():
+_S1AP_RADIO_CAUSES = {
+    "0": "unspecified",
+    "1": "tx2relocoverall-expiry",
+    "2": "successful-handover",
+    "3": "release-due-to-eutran-generated-reason",
+    "4": "handover-cancelled",
+    "5": "partial-handover",
+    "6": "ho-failure-in-target-EPC-eNB-or-target-system",
+    "7": "ho-target-not-allowed",
+    "8": "tS1relocoverall-expiry",
+    "9": "tS1relocprep-expiry",
+    "10": "cell-not-available",
+    "11": "unknown-targetID",
+    "14": "no-radio-resources-available-in-target-cell",
+    "15": "unknown-mme-ue-s1ap-id",
+    "16": "unknown-enb-ue-s1ap-id",
+    "18": "failure-in-radio-interface-procedure",
+    "20": "invalid-qos-combination",
+    "21": "radio-connection-with-ue-lost",
+    "24": "interaction-with-other-procedure",
+    "36": "encryption-and-or-integrity-protection-algorithms-not-supported",
+}
+
+
+def _build_s1ap_info(s1ap_proc: str, info_col: str, erab_id: str = "", radio_cause: str = "") -> str:
+    """Build info for S1AP messages with bearer and cause details."""
+    parts = []
+
+    # E-RAB ID
+    if erab_id:
+        # Map common E-RAB IDs to bearers
+        erab_names = {"5": "Default-DRB", "6": "IMS-Signaling", "7": "VoLTE-QCI1"}
+        name = erab_names.get(erab_id, f"EBI-{erab_id}")
+        parts.append(f"Bearer:{name}(EBI={erab_id})")
+
+    # Radio cause
+    if radio_cause:
+        cause_name = _S1AP_RADIO_CAUSES.get(radio_cause, f"cause-{radio_cause}")
+        parts.append(f"Cause:{cause_name}")
+
+    # Also try to extract from info column
+    if not parts:
+        if "cause=" in info_col.lower():
+            cause_start = info_col.lower().index("cause=")
+            cause = info_col[cause_start:].split("]")[0].split(",")[0]
+            parts.append(cause.replace("cause=", "").strip())
+        elif "cause" in info_col.lower():
+            for part in info_col.split("["):
+                if "cause" in part.lower():
+                    parts.append(part.strip().rstrip("]"))
+                    break
+
+    return " | ".join(parts)
+
+
+def _build_ngap_info(ngap_proc: str, info_col: str, ngap_cause: str = "") -> str:
+    """Build info for NGAP messages."""
+    parts = []
+    if ngap_cause:
+        parts.append(f"Cause:{ngap_cause}")
+    # Extract from info column
+    if not parts and "cause" in info_col.lower():
         for part in info_col.split("["):
             if "cause" in part.lower():
-                return part.strip().rstrip("]")
-    return ""
+                parts.append(part.strip().rstrip("]"))
+                break
+    return " | ".join(parts)
 
 
 def _build_gtp_info(gtpv2_type: str, gtpv2_cause: str) -> str:

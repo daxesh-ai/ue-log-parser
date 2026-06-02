@@ -29,6 +29,8 @@ class LogSession:
     harq_samples: list = field(default_factory=list)
     # UL power control config from 0xB8A7
     ul_power_config: list = field(default_factory=list)
+    # Bearer/QoS flow events (from S1AP/NGAP/NAS)
+    bearer_events: list = field(default_factory=list)
     # Source file names (for multi-file sessions)
     source_files: list = field(default_factory=list)
 
