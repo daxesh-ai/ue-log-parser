@@ -240,11 +240,47 @@ def load_file(
     return session
 
 
-def load_files(
+def _detect_source_type(filepath: Path) -> str:
+    """Detect the source type of a log file for multi-source fusion tagging."""
+    from .ingest.logarchive_reader import is_logarchive, is_sysdiagnose
+    from .ingest.pcap_reader import is_pcap_file
+    from .ingest.quts_reader import is_quts_file
+
+    if is_logarchive(filepath):
+        return "logarchive"
+    if is_sysdiagnose(filepath):
+        return "sysdiagnose"
+    if filepath.suffix.lower() in (".pcap", ".pcapng"):
+        return "PCAP"
+    if is_pcap_file(filepath):
+        return "PCAP"
+    if filepath.suffix.lower() == ".hdf" or is_quts_file(filepath):
+        return "QUTS"
+    return "unknown"
+
+
+def load_multi_source(
     filepaths: list[Path],
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> LogSession:
-    """Load multiple .hdf/.pcap files and merge by timestamp into one session."""
+    """Multi-source fusion: load PCAP + logarchive + QUTS into one timeline.
+
+    Each message is tagged with:
+    - source_file: filename
+    - source_type: "QUTS" | "PCAP" | "logarchive" | "sysdiagnose"
+
+    Useful for overlaying baseband signaling (QUTS) with network traces (PCAP)
+    and Apple system events (logarchive) on the same timeline.
+    """
+    return load_files(filepaths, progress_callback, tag_source_type=True)
+
+
+def load_files(
+    filepaths: list[Path],
+    progress_callback: Callable[[int, int], None] | None = None,
+    tag_source_type: bool = False,
+) -> LogSession:
+    """Load multiple files and merge by timestamp into one session."""
     import sys
     merged = LogSession(filename=f"{len(filepaths)} files merged")
     merged.source_files = [p.name for p in filepaths]
@@ -259,10 +295,13 @@ def load_files(
                     progress_callback(overall, 100)
 
             session = load_file(filepath, file_progress)
-            # Tag each message with its source file
+            # Tag each message with source file and type
             fname = filepath.name
+            src_type = _detect_source_type(filepath) if tag_source_type else ""
             for msg in session.messages:
                 msg.source_file = fname
+                if src_type:
+                    msg.info = f"[{src_type}] {msg.info}" if msg.info else f"[{src_type}]"
             all_messages.extend(session.messages)
             # Merge time series
             for attr in ("phy_measurements", "phy_cqi_samples", "phy_beam_samples",

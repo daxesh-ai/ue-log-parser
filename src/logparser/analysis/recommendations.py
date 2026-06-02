@@ -63,6 +63,7 @@ def analyze_session(session: LogSession) -> list[Recommendation]:
     _check_security_mode_failures(session, recommendations)
     _check_pci_mod3_conflicts(session, recommendations)
     _check_ul_power_limited(session, recommendations)
+    _check_measurement_gap_missing(session, recommendations)
     _check_measurement_gaps(session, recommendations)
 
     # Sort by severity then count
@@ -1277,6 +1278,110 @@ def _check_pci_mod3_conflicts(session: LogSession, recs: list):
             ),
             parameter="PCI-plan, mod-3-separation, PSS-sequence-assignment",
         ))
+
+
+def _check_measurement_gap_missing(session: LogSession, recs: list):
+    """Detect inter-frequency measurement objects configured without a measurement gap.
+
+    In NR, when the UE is configured with measurement objects on frequencies
+    different from the serving cell, it needs a measurement gap to tune its
+    receiver to those frequencies. Without a gap, the UE either:
+    - Cannot measure (blind spot → late HO)
+    - Uses SSB-based measurement within serving BWP (only works for intra-band)
+
+    This check flags: inter-freq measObjects present but no measGapConfig.
+    """
+    import re
+
+    serving_freqs: set[int] = set()
+    inter_freq_objects: set[int] = set()
+    has_gap_config = False
+    gap_released = False
+    msg_indices = []
+
+    for msg in session.messages:
+        if not msg.decoded_tree or "rrcReconfiguration" not in msg.summary:
+            continue
+
+        tree_str = str(msg.decoded_tree)
+
+        # Track measGapConfig presence
+        if "measGapConfig" in tree_str:
+            if "'release'" in tree_str[tree_str.find("measGapConfig"):tree_str.find("measGapConfig") + 100]:
+                gap_released = True
+            else:
+                has_gap_config = True
+                gap_released = False
+
+        # Extract serving cell frequency (from spCellConfig or PCell info)
+        if msg.arfcn and msg.arfcn > 0:
+            serving_freqs.add(msg.arfcn)
+
+        # Extract measurement object frequencies
+        if "measConfig" in tree_str and "measObjectToAddModList" in tree_str:
+            # Find all ssbFrequency / carrierFreq values
+            freqs = re.findall(r"(?:ssbFrequency|carrierFreq).*?(\d{5,7})", tree_str)
+            for f_str in freqs:
+                freq = int(f_str)
+                if freq not in serving_freqs and freq > 100000:  # Skip LTE EARFCNs
+                    inter_freq_objects.add(freq)
+                    msg_indices.append(msg.index)
+
+    # Flag: inter-freq objects exist but no gap configured (or gap was released)
+    if inter_freq_objects and (not has_gap_config or gap_released):
+        # Determine if these are truly inter-band (need gap) vs intra-band (gap-less possible)
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        serving_bands = {_arfcn_to_band(f) for f in serving_freqs if f > 0}
+        inter_bands = {_arfcn_to_band(f) for f in inter_freq_objects}
+
+        # True inter-band: different bands need measurement gaps
+        cross_band = inter_bands - serving_bands - {""}
+        if cross_band:
+            recs.append(Recommendation(
+                rank=0, category="HO",
+                issue=f"No Measurement Gap for Inter-Band Objects ({len(cross_band)} bands)",
+                severity="Major",
+                count=len(inter_freq_objects),
+                msg_indices=msg_indices[:5],
+                root_cause=(
+                    f"UE configured with inter-band measurement objects on bands "
+                    f"{sorted(cross_band)} but measGapConfig is "
+                    f"{'released' if gap_released else 'not configured'}. "
+                    f"Without a measurement gap, the UE cannot tune to these frequencies "
+                    f"to measure neighbor cells — causing blind spots and late handovers. "
+                    f"Serving bands: {sorted(serving_bands - {''})}."
+                ),
+                recommendation=(
+                    "1. Configure measGapConfig with appropriate gap pattern (gapOffset)\n"
+                    "2. Use FR2 gap pattern (ms20) for mmWave measurements\n"
+                    "3. If gap-less measurement supported (intra-band SSB): verify UE capability\n"
+                    "4. Check if measGapRelease was intentional (e.g., after HO completion)\n"
+                    "5. Missing gaps cause delayed A3/B1 events → late HO → RLF"
+                ),
+                parameter="measGapConfig, gapOffset, mgl, mgrp, mgta, needForGap",
+            ))
+        elif inter_freq_objects and not cross_band:
+            # Same band but different ARFCN — might still need gap for FR2
+            fr2_freqs = {f for f in inter_freq_objects if f > 2000000}
+            if fr2_freqs and not has_gap_config:
+                recs.append(Recommendation(
+                    rank=0, category="HO",
+                    issue=f"No Measurement Gap for FR2 Inter-Freq ({len(fr2_freqs)} objects)",
+                    severity="Minor",
+                    count=len(fr2_freqs),
+                    msg_indices=msg_indices[:3],
+                    root_cause=(
+                        f"FR2 measurement objects configured on {len(fr2_freqs)} frequencies "
+                        f"without measGapConfig. FR2 beam sweeping typically requires gaps "
+                        f"unless the UE supports simultaneous multi-panel reception."
+                    ),
+                    recommendation=(
+                        "1. Verify UE capability: needForGapsIntra/InterFreq per band\n"
+                        "2. If beam-based: SSB measurement without gap may be supported\n"
+                        "3. Monitor for late or missing measurement reports on these freqs"
+                    ),
+                    parameter="measGapConfig, needForGapsIntraFreq-FR2, ssb-MTC",
+                ))
 
 
 def _check_measurement_gaps(session: LogSession, recs: list):
