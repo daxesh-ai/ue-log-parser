@@ -37,6 +37,8 @@ Examples:
                         help="Export full session (messages + PHY/MAC data) to JSON")
     parser.add_argument("--report", type=Path, metavar="OUT.html",
                         help="Export Top-20 issues report (.html or .pdf)")
+    parser.add_argument("--train-model", action="store_true",
+                        help="Train ML anomaly model from provided session files")
     parser.add_argument("--dir", type=Path, metavar="DIR",
                         help="Batch mode: process all .hdf/.pcap files in DIR")
 
@@ -51,6 +53,11 @@ Examples:
     # Batch directory mode
     if getattr(args, "dir", None):
         _batch_dir(args)
+        return
+
+    # ML model training mode
+    if getattr(args, "train_model", False):
+        _train_ml_model(args)
         return
 
     for f in args.files:
@@ -222,6 +229,45 @@ def _print_recommendations_json(recs) -> None:
             "parameter": r.parameter,
         })
     print(json.dumps(output, indent=2))
+
+
+def _train_ml_model(args):
+    """Train ML anomaly detection model from provided session files."""
+    from logparser.pipeline import load_file
+
+    files = args.files
+    if len(files) < 3:
+        print("Error: Need at least 3 session files for training", file=sys.stderr)
+        print("Usage: logparser-cli file1.hdf file2.hdf file3.hdf --train-model", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Training ML anomaly model from {len(files)} sessions...", file=sys.stderr)
+
+    sessions = []
+    for f in files:
+        print(f"  Loading {f.name}...", file=sys.stderr, end=" ")
+        try:
+            session = load_file(f)
+            sessions.append(session)
+            print(f"{len(session.messages)} msgs ✓", file=sys.stderr)
+        except Exception as e:
+            print(f"SKIP ({e})", file=sys.stderr)
+
+    if len(sessions) < 3:
+        print(f"Error: Only {len(sessions)} sessions loaded (need ≥ 3)", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from logparser.analysis.ml_anomaly import train_model
+        result = train_model(sessions)
+        print(f"\n✓ Model trained on {result['n_sessions']} sessions", file=sys.stderr)
+        print(f"  Features: {result['n_features']}", file=sys.stderr)
+        print(f"  Saved to: {result['model_path']}", file=sys.stderr)
+        print(f"\nML anomaly detection will now run automatically on future analyses.")
+    except ImportError:
+        print("Error: scikit-learn required for ML training", file=sys.stderr)
+        print("Install with: pip install scikit-learn", file=sys.stderr)
+        sys.exit(1)
 
 
 def _batch_dir(args):

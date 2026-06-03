@@ -69,6 +69,13 @@ def analyze_session(session: LogSession) -> list[Recommendation]:
     # Optional: VoIP/Video QoE check
     _check_qoe_degradation(session, recommendations)
 
+    # Optional: ML Anomaly Detection
+    try:
+        from logparser.analysis.ml_anomaly import ml_analyze_session
+        recommendations.extend(ml_analyze_session(session))
+    except (ImportError, Exception):
+        pass  # scikit-learn not installed or model not trained
+
     # Optional: Field Reference Database comparison
     try:
         from logparser.analysis.field_reference import check_field_deviations
