@@ -4,6 +4,18 @@ Apple iOS devices create baseband logs as:
 - Individual .acp files in a bb-trace directory
 - MergedFile_Diag.hdf (QUTS format) = merged output from .acp files
 
+.acp File Format (reverse-engineered):
+- Sync marker: 0xFFFF A55A (4 bytes)
+- Variable-size frames: header(20 bytes) + payload + CRC(4 bytes)
+- Frame header: sync(4) + seq(2) + type(2) + payload_len(4) + timestamp(8)
+- Frame types: 1 = large container (encrypted/compressed), 4 = data frames
+- Payload contains Apple-specific log codes (NOT standard Qualcomm DIAG)
+- Data is encrypted/obfuscated — cannot be parsed without Apple's tools
+
+⚠️ Raw .acp parsing is NOT possible without Apple's decryption layer.
+   The MergedFile_Diag.hdf is the only accessible format for baseband logs.
+   Apple's sysdiagnose tool generates the merged .hdf from .acp files.
+
 Strategy:
 1. If user opens a bb-trace directory → look for sibling MergedFile_Diag.hdf
 2. If user opens a .acp file → look for MergedFile in same/parent directory
