@@ -66,6 +66,13 @@ def analyze_session(session: LogSession) -> list[Recommendation]:
     _check_measurement_gap_missing(session, recommendations)
     _check_measurement_gaps(session, recommendations)
 
+    # Optional: Field Reference Database comparison
+    try:
+        from logparser.analysis.field_reference import check_field_deviations
+        recommendations.extend(check_field_deviations(session))
+    except Exception:
+        pass
+
     # Sort by severity then count
     severity_order = {"Critical": 0, "Major": 1, "Minor": 2}
     recommendations.sort(key=lambda r: (severity_order.get(r.severity, 3), -r.count))
