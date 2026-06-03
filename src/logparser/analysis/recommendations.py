@@ -66,6 +66,9 @@ def analyze_session(session: LogSession) -> list[Recommendation]:
     _check_measurement_gap_missing(session, recommendations)
     _check_measurement_gaps(session, recommendations)
 
+    # Optional: VoIP/Video QoE check
+    _check_qoe_degradation(session, recommendations)
+
     # Optional: Field Reference Database comparison
     try:
         from logparser.analysis.field_reference import check_field_deviations
@@ -1285,6 +1288,84 @@ def _check_pci_mod3_conflicts(session: LogSession, recs: list):
             ),
             parameter="PCI-plan, mod-3-separation, PSS-sequence-assignment",
         ))
+
+
+def _check_qoe_degradation(session: LogSession, recs: list):
+    """Check VoIP/Video QoE metrics for quality degradation."""
+    qoe = getattr(session, "qoe_metrics", [])
+    if not qoe:
+        return
+
+    for call in qoe:
+        # VoIP MOS degradation
+        if call.mos_score > 0 and call.mos_score < 3.5:
+            severity = "Critical" if call.mos_score < 2.5 else "Major"
+            recs.append(Recommendation(
+                rank=0, category="QoE",
+                issue=f"VoIP MOS {call.mos_score:.1f} — Quality Degradation ({call.codec})",
+                severity=severity,
+                count=1,
+                msg_indices=[session.messages[0].index] if session.messages else [],
+                root_cause=(
+                    f"Voice call quality below acceptable threshold. "
+                    f"MOS={call.mos_score:.1f} (threshold=3.5). "
+                    f"Codec={call.codec}, Jitter={call.jitter_ms:.1f}ms, "
+                    f"Loss={call.packet_loss_pct:.1f}%, Duration={call.duration_sec:.0f}s."
+                ),
+                recommendation=(
+                    "1. Check radio link quality during the call (RSRP/SINR)\n"
+                    "2. If jitter high: check MAC scheduler prioritization for QCI-1\n"
+                    "3. If loss high: check RLC AM mode for voice bearer\n"
+                    "4. Verify dedicated QoS bearer (5QI=1) was established"
+                ),
+                parameter="5QI-1, PDCP-config, jitter-buffer, codec-rate",
+            ))
+
+        # Video freeze detection
+        if call.freeze_events > 0:
+            severity = "Critical" if call.freeze_duration_sec > 5.0 else "Major"
+            recs.append(Recommendation(
+                rank=0, category="QoE",
+                issue=f"Video Freeze Detected ({call.freeze_events}x, {call.freeze_duration_sec:.1f}s total)",
+                severity=severity,
+                count=call.freeze_events,
+                msg_indices=[session.messages[0].index] if session.messages else [],
+                root_cause=(
+                    f"Video stream experienced {call.freeze_events} freeze events "
+                    f"(total {call.freeze_duration_sec:.1f}s). Max gap: {call.max_gap_ms:.0f}ms. "
+                    f"Codec: {call.codec}. This indicates packet loss bursts or "
+                    f"sustained throughput drops below video bitrate requirement."
+                ),
+                recommendation=(
+                    "1. Check DL throughput during freeze periods\n"
+                    "2. Verify QoS bearer for video (5QI=2 or 5QI=7)\n"
+                    "3. If during HO: check HO interruption time\n"
+                    "4. Check TCP/UDP buffer at application layer"
+                ),
+                parameter="5QI-2, DL-throughput, HO-interruption-time",
+            ))
+
+        # High packet loss (even if MOS is still acceptable)
+        if call.packet_loss_pct > 5.0:
+            recs.append(Recommendation(
+                rank=0, category="QoE",
+                issue=f"High RTP Packet Loss: {call.packet_loss_pct:.1f}% ({call.codec})",
+                severity="Major",
+                count=1,
+                msg_indices=[session.messages[0].index] if session.messages else [],
+                root_cause=(
+                    f"RTP stream (SSRC={call.ssrc:#x}) has {call.packet_loss_pct:.1f}% "
+                    f"packet loss over {call.duration_sec:.0f}s. "
+                    f"This exceeds the 1-2% threshold for acceptable voice/video quality."
+                ),
+                recommendation=(
+                    "1. Check HARQ BLER during the call period\n"
+                    "2. Verify RLC mode (AM with retransmission for voice)\n"
+                    "3. Check for handover-related packet loss\n"
+                    "4. Monitor PDCP discard timer configuration"
+                ),
+                parameter="RLC-mode, PDCP-discardTimer, HARQ-maxRetx",
+            ))
 
 
 def _check_measurement_gap_missing(session: LogSession, recs: list):
