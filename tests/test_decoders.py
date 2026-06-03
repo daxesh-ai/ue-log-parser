@@ -165,3 +165,116 @@ class TestJsonExport(unittest.TestCase):
         # Must be JSON serializable
         serialized = json.dumps(d)
         assert "rrcReconfiguration" in serialized
+
+
+class TestNasCauseLookup(unittest.TestCase):
+    def test_5gmm_cause_known(self):
+        from logparser.decoders.nas_causes import format_cause
+        result = format_cause(22, is_5g=True)
+        assert "#22" in result
+        assert "Congestion" in result
+
+    def test_5gmm_cause_unknown(self):
+        from logparser.decoders.nas_causes import format_cause
+        result = format_cause(999, is_5g=True)
+        assert "#999" in result
+        assert "Unknown" in result
+
+    def test_emm_cause_known(self):
+        from logparser.decoders.nas_causes import format_cause
+        result = format_cause(11, is_5g=False)
+        assert "PLMN not allowed" in result
+
+    def test_emm_cause_congestion(self):
+        from logparser.decoders.nas_causes import format_cause
+        result = format_cause(22, is_5g=False)
+        assert "Congestion" in result
+
+
+class TestBandMapping(unittest.TestCase):
+    def test_verizon_n261_mmwave(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(2070875) == "n261"
+        assert _arfcn_to_band(2084999) == "n261"
+
+    def test_verizon_n77_cband(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(648672) == "n77"
+        assert _arfcn_to_band(660000) == "n77"
+
+    def test_verizon_n2_pcs(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(386000) == "n2"
+        assert _arfcn_to_band(398000) == "n2"
+
+    def test_n66_aws(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(422000) == "n66"
+
+    def test_n5_850mhz(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(173800) == "n5"
+        assert _arfcn_to_band(178800) == "n5"
+
+    def test_n260_39ghz(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(2250000) == "n260"
+
+    def test_lte_b13(self):
+        from logparser.decoders.info_extractor import _arfcn_to_band
+        assert _arfcn_to_band(5180) == "B13"
+
+
+class TestUlPowerDecoder(unittest.TestCase):
+    def test_normal_power(self):
+        from logparser.decoders.nr_ul_power import decode_ul_power_config
+        # Build minimal 0xB8A7 payload: ver=5, hdr=8, rec with Pcmax at [17],[18]
+        header = bytes([5, 0, 3, 0, 0, 0, 0, 1])
+        rec = bytes(17) + bytes([20, 23]) + bytes(76 - 19)  # FR2=20, FR1=23
+        payload = header + rec
+        result = decode_ul_power_config(payload, TS)
+        assert result is not None
+        assert result.pcmax_fr1_dbm == 23
+        assert result.pcmax_fr2_dbm == 20
+        assert not result.power_headroom_limited
+
+    def test_low_power_fr2(self):
+        from logparser.decoders.nr_ul_power import decode_ul_power_config
+        header = bytes([5, 0, 3, 0, 0, 0, 0, 1])
+        rec = bytes(17) + bytes([0, 23]) + bytes(76 - 19)  # FR2=0 (module off)
+        payload = header + rec
+        result = decode_ul_power_config(payload, TS)
+        assert result is not None
+        assert result.pcmax_fr2_dbm == 0
+        assert result.power_headroom_limited
+
+
+class TestHarqDecoder(unittest.TestCase):
+    def test_harq_bler_calculation(self):
+        from logparser.decoders.nr_phy import decode_harq_feedback
+        # Build 0xB896 payload: ver=0, hdr=20, nack@20, ack@24
+        header = bytes(20)  # version=0 at [0]
+        nack = struct.pack("<I", 100)   # 100 NACKs
+        ack = struct.pack("<I", 9900)   # 9900 ACKs
+        payload = header + nack + ack
+        result = decode_harq_feedback(payload, TS)
+        assert result is not None
+        assert result.nack_count == 100
+        assert result.ack_count == 9900
+        assert abs(result.bler_pct - 1.0) < 0.01  # 1% BLER
+
+    def test_harq_zero_total(self):
+        from logparser.decoders.nr_phy import decode_harq_feedback
+        header = bytes(20)
+        payload = header + struct.pack("<I", 0) + struct.pack("<I", 0)
+        result = decode_harq_feedback(payload, TS)
+        assert result is None  # Zero total → skip
+
+
+class TestBearerTracker(unittest.TestCase):
+    def test_qci_format(self):
+        from logparser.analysis.bearer_tracker import format_qci
+        assert "Voice" in format_qci(1)
+        assert "GBR" in format_qci(1)
+        assert "Best Effort" in format_qci(8)
+        assert "IMS" in format_qci(5)
