@@ -49,6 +49,7 @@ def analyze_session(session: LogSession) -> list[Recommendation]:
     _check_rrc_releases(session, recommendations)
     _check_reestablishments(session, recommendations)
     _check_nas_failures(session, recommendations)
+    _check_pcap_failures(session, recommendations)
     _check_sip_failures(session, recommendations)
     _check_voice_ho_failures(session, recommendations)
     _check_p_access_network_info(session, recommendations)
@@ -929,6 +930,153 @@ def _check_reestablishments(session: LogSession, recs: list):
                 "4. Check for missing neighbor relations"
             ),
             parameter="T310, N310, N311, timeToTrigger, hysteresis",
+        ))
+
+
+def _check_pcap_failures(session: LogSession, recs: list):
+    """Detect failures in PCAP-sourced messages (S1AP, NAS, GTP).
+
+    Complements the RRC-focused rules by catching network-side events:
+    - PDN connectivity / PDU Session rejects with ESM/EMM cause
+    - EPS Fallback triggers (VoNR→VoLTE, 5G→EPS)
+    - PLMN mismatch causing IMS PDN rejection
+    - UEContextRelease due to radio failure (not user inactivity)
+    """
+    pdn_reject_indices = []
+    pdn_reject_causes = []
+    eps_fallback_indices = []
+    plmn_mismatch_indices = []
+    ue_release_failures = []
+
+    for msg in session.messages:
+        summary = msg.summary.lower()
+        info = (msg.info or "").lower()
+        annotations = " ".join(msg.annotations).lower()
+
+        # PDN/PDU session rejects
+        if "pdn connectivity reject" in summary or "pdu session reject" in summary:
+            pdn_reject_indices.append(msg.index)
+            # Extract ESM cause from info
+            cause_info = msg.info or ""
+            if cause_info:
+                pdn_reject_causes.append(cause_info)
+            elif "not subscribed" in summary:
+                pdn_reject_causes.append("ESM #33 — Service not subscribed")
+            elif "not authorized" in summary:
+                pdn_reject_causes.append("ESM #35 — Not authorized")
+
+        # EPS Fallback (VoNR → VoLTE / 5GS → EPS)
+        if any(kw in summary for kw in [
+            "ims-voice-eps-fallback", "rat-fallback", "fivegs-to-eps",
+            "eps-fallback", "voice-eps-fallback",
+        ]):
+            eps_fallback_indices.append(msg.index)
+
+        # PLMN mismatch — detected if "PLMN not allowed" or "not authorized" in NAS reject
+        if ("plmn not allowed" in summary or "plmn not allowed" in info or
+                "plmn not allowed" in annotations or "plmn mismatch" in info):
+            plmn_mismatch_indices.append(msg.index)
+
+        # UE context release due to radio failure (not normal)
+        if "uecontextrelease" in summary.replace(" ", "").lower():
+            if any(kw in summary for kw in [
+                "radio-connection-with-ue-lost", "failure-in-radio",
+                "handover-failure",
+            ]):
+                ue_release_failures.append(msg.index)
+
+    # PDN reject recommendation
+    if pdn_reject_indices:
+        cause_str = "; ".join(set(pdn_reject_causes)) if pdn_reject_causes else "unknown ESM cause"
+        recs.append(Recommendation(
+            rank=0, category="NAS",
+            issue=f"PDN/PDU Session Rejected ({len(pdn_reject_indices)}x) — {cause_str}",
+            severity="Critical",
+            count=len(pdn_reject_indices),
+            msg_indices=pdn_reject_indices,
+            root_cause=(
+                f"Network rejected PDN Connectivity / PDU Session Request. "
+                f"Cause: {cause_str}. "
+                f"This prevents the UE from establishing or continuing data connectivity. "
+                f"Common causes: subscription mismatch, APN not provisioned, PLMN policy."
+            ),
+            recommendation=(
+                "1. Check UE subscription in HSS/UDM for requested APN\n"
+                "2. Verify PLMN/HPLMN policy allows this APN in visited network\n"
+                "3. Check PDN type (IPv4/IPv6/IPv4v6) matches subscription\n"
+                "4. For IMS APN: verify IMS subscription is provisioned\n"
+                "5. TS 23.502 §4.13.3.1: MME must honor HPLMN IMS context on fallback"
+            ),
+            parameter="APN-config, IMS-subscription, PLMN-policy, ESM-cause",
+        ))
+
+    # EPS Fallback recommendation
+    if eps_fallback_indices:
+        recs.append(Recommendation(
+            rank=0, category="Voice",
+            issue=f"EPS Fallback Triggered ({len(eps_fallback_indices)}x) — VoNR→VoLTE",
+            severity="Major",
+            count=len(eps_fallback_indices),
+            msg_indices=eps_fallback_indices,
+            root_cause=(
+                "VoNR call triggered EPS Fallback — the 5G network could not support "
+                "IMS voice and redirected the UE to LTE (4G) for voice service. "
+                "This indicates either: VoNR not provisioned/capable at this cell, "
+                "or PLMN policy forces CSFB for specific subscription types."
+            ),
+            recommendation=(
+                "1. Verify VoNR capability at the serving gNB\n"
+                "2. Check UE IMS registration in 5G context before fallback\n"
+                "3. Verify 5QI-1 bearer was offered before fallback trigger\n"
+                "4. Check eMSC/5GC interworking configuration\n"
+                "5. If PLMN mismatch: see HPLMN policy for roaming IMS"
+            ),
+            parameter="VoNR-config, 5QI-1, eMSC-interwork, EPS-fallback-policy",
+        ))
+
+    # PLMN mismatch
+    if plmn_mismatch_indices:
+        recs.append(Recommendation(
+            rank=0, category="NAS",
+            issue=f"PLMN Mismatch — Visited PLMN Not Allowed ({len(plmn_mismatch_indices)}x)",
+            severity="Critical",
+            count=len(plmn_mismatch_indices),
+            msg_indices=plmn_mismatch_indices,
+            root_cause=(
+                "Network rejected request due to PLMN mismatch between UE's "
+                "HPLMN (home network) and the serving/visited PLMN. "
+                "Subscription policy 'Visited PLMN not allowed' may be blocking "
+                "IMS/data PDN continuation during inter-PLMN handover."
+            ),
+            recommendation=(
+                "1. Check roaming agreement between HPLMN and VPLMN\n"
+                "2. Verify MME is using correct HPLMN from 5GC context (TS 23.502)\n"
+                "3. Check subscriber profile: allowed PLMNs list in HSS/UDM\n"
+                "4. For EPS Fallback: MME must preserve HPLMN from 5G context"
+            ),
+            parameter="HPLMN-policy, roaming-agreement, HSS-PLMN-list",
+        ))
+
+    # UE context release failures
+    if ue_release_failures:
+        recs.append(Recommendation(
+            rank=0, category="HO",
+            issue=f"UE Context Released — Radio Failure ({len(ue_release_failures)}x)",
+            severity="Major",
+            count=len(ue_release_failures),
+            msg_indices=ue_release_failures,
+            root_cause=(
+                "S1AP UEContextRelease triggered by radio layer failure "
+                "(radio-connection-with-ue-lost or handover-failure). "
+                "UE dropped from the network due to radio link problem."
+            ),
+            recommendation=(
+                "1. Check DL coverage at UE location\n"
+                "2. Verify HO preparation was successful before execution\n"
+                "3. Check T310 timer and N310 threshold configuration\n"
+                "4. Review neighbor cell list for missing cells"
+            ),
+            parameter="T310, N310, HO-preparation, coverage",
         ))
 
 

@@ -61,6 +61,8 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
             "-e", "s1ap.radioNetwork",   # 22
             "-e", "ngap.procedureCode",  # 23
             "-e", "ngap.Cause",          # 24
+            "-e", "nas_eps.emm.cause",   # 25  EMM cause (TAU reject, attach reject)
+            "-e", "nas_eps.esm.cause",   # 26  ESM cause (PDN reject, bearer deactivate)
             "-E", "separator=\t",
             "-E", "quote=n",
             "-E", "occurrence=f",
@@ -117,6 +119,8 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
         s1ap_radio_cause = _get(22)
         ngap_proc = _get(23)
         ngap_cause = _get(24)
+        nas_emm_cause = _get(25)
+        nas_esm_cause = _get(26)
 
         # Use IPv6 if IPv4 not available
         if not src:
@@ -161,6 +165,13 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
             info = _build_gtp_info(gtpv2_type, gtpv2_cause)
         elif "Diameter" in proto_col:
             info = _build_diameter_info(diameter_cmd)
+        elif "NAS-EPS" in proto_col or "NAS-5GS" in proto_col:
+            info = _build_nas_info(nas_emm_cause, nas_esm_cause, info_col)
+
+        # Determine severity from NAS causes and reject patterns
+        from logparser.core.enums import Severity as _Sev
+        severity = _classify_pcap_severity(info_col, nas_emm_cause, nas_esm_cause,
+                                           s1ap_radio_cause, gtpv2_cause)
 
         msg = ParsedMessage(
             index=len(messages),
@@ -174,6 +185,7 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
             source_entity=source_entity,
             target_entity=target_entity,
             info=info,
+            severity=severity,
         )
         messages.append(msg)
 
@@ -186,6 +198,116 @@ def load_pcap(filepath: Path, progress_callback=None) -> LogSession:
         progress_callback(len(messages), len(messages))
 
     return session
+
+
+# ── NAS EMM/ESM Cause lookup tables (3GPP TS 24.301) ────────────────────────
+_EMM_CAUSES = {
+    "2": "IMSI unknown in HSS",
+    "3": "Illegal UE",
+    "5": "IMEI not accepted",
+    "6": "Illegal ME",
+    "7": "EPS services not allowed",
+    "8": "EPS/non-EPS services not allowed",
+    "9": "UE identity cannot be derived",
+    "10": "Implicitly detached",
+    "11": "PLMN not allowed",
+    "12": "Tracking area not allowed",
+    "13": "Roaming not allowed in this TA",
+    "14": "EPS services not allowed in PLMN",
+    "15": "No suitable cells in TA",
+    "18": "CS domain not available",
+    "19": "ESM failure",
+    "20": "MAC failure",
+    "21": "Synch failure",
+    "22": "Congestion",
+    "23": "UE security capabilities mismatch",
+    "25": "Not authorized for this CSG",
+    "26": "Non-EPS authentication unacceptable",
+    "35": "Requested service option not authorized",
+    "39": "CS service temporarily not available",
+    "40": "No EPS bearer context activated",
+}
+_ESM_CAUSES = {
+    "8":  "Operator determined barring",
+    "26": "Insufficient resources",
+    "27": "Missing or unknown APN",
+    "28": "Unknown PDN type",
+    "29": "User authentication failed",
+    "30": "Request rejected by SGW/PGW",
+    "31": "Request rejected, unspecified",
+    "32": "Service option not supported",
+    "33": "Requested service option not subscribed",
+    "34": "Service option temporarily out of order",
+    "35": "PTI already in use",
+    "36": "Regular deactivation",
+    "37": "EPS QoS not accepted",
+    "38": "Network failure",
+    "39": "Reactivation requested",
+    "41": "Semantic error in TFT operation",
+    "42": "Syntactical error in TFT operation",
+    "43": "Invalid EPS bearer identity",
+    "44": "Semantic errors in packet filter(s)",
+    "95": "Semantically incorrect message",
+    "111": "Protocol error",
+}
+
+# Severity-triggering patterns in PCAP info columns
+_PCAP_FAILURE_PATTERNS = [
+    "reject", "Reject", "failed", "Failed", "failure", "Failure",
+    "ims-voice-eps-fallback", "rat-fallback",
+    "not subscribed", "not authorized", "not allowed",
+    "PLMN not allowed", "Tracking area not allowed",
+    "authentication failed",
+]
+_PCAP_WARNING_PATTERNS = [
+    "CS domain not available", "user-inactivity", "normal-release",
+    "release-due-to", "inactivity", "radio-connection-with-ue-lost",
+]
+
+
+def _build_nas_info(emm_cause: str, esm_cause: str, info_col: str) -> str:
+    """Build info for NAS-EPS messages with cause code lookup."""
+    parts = []
+    if emm_cause:
+        cause_name = _EMM_CAUSES.get(emm_cause, f"EMM-cause-{emm_cause}")
+        parts.append(f"EMM: #{emm_cause} {cause_name}")
+    if esm_cause:
+        cause_name = _ESM_CAUSES.get(esm_cause, f"ESM-cause-{esm_cause}")
+        parts.append(f"ESM: #{esm_cause} {cause_name}")
+    return " | ".join(parts)
+
+
+def _classify_pcap_severity(info_col: str, emm_cause: str, esm_cause: str,
+                             s1ap_cause: str, gtp_cause: str):
+    """Classify severity for PCAP-derived messages."""
+    from logparser.core.enums import Severity
+
+    # ESM/EMM cause codes that indicate failures
+    _FAILURE_EMM = {"2", "3", "6", "7", "8", "11", "12", "13", "14", "20", "21", "23", "25"}
+    _FAILURE_ESM = {"8", "27", "28", "29", "30", "31", "32", "33", "34", "41", "42"}
+
+    if emm_cause in _FAILURE_EMM:
+        return Severity.FAILURE
+    if esm_cause in _FAILURE_ESM:
+        return Severity.FAILURE
+    if s1ap_cause and s1ap_cause not in ("0", ""):
+        # Non-zero S1AP radio cause often indicates a failure
+        if s1ap_cause in ("21", "6", "18", "14"):  # ue-lost, ho-failed, etc.
+            return Severity.FAILURE
+    # GTP cause non-success
+    if gtp_cause and gtp_cause not in ("16", ""):  # 16=Accepted
+        return Severity.FAILURE
+
+    # Pattern-based severity
+    info_lower = info_col.lower()
+    for pattern in _PCAP_FAILURE_PATTERNS:
+        if pattern.lower() in info_lower:
+            return Severity.FAILURE
+    for pattern in _PCAP_WARNING_PATTERNS:
+        if pattern.lower() in info_lower:
+            return Severity.WARNING
+
+    return Severity.NORMAL
 
 
 def _build_sip_info(sip_from: str, sip_to: str, method: str, status: str, cseq: str, sdp_media: str, p_access_net_info: str = "") -> str:

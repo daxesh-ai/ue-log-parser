@@ -63,14 +63,30 @@
     "Status: 504",
     "Status: 580",
     "Status: 600",
-    "Status: 603"
+    "Status: 603",
+    "PDN connectivity reject",
+    "pdn connectivity reject",
+    "Attach reject",
+    "attach reject",
+    "ESM cause",
+    "EMM cause",
+    "UEContextReleaseRequest",
+    "HandoverFailed",
+    "handoverFailed",
+    "ForwardRelocationFailed",
+    "ims-voice-eps-fallback"
   ],
   "warning_messages": [
     "rrcReestablishmentRequest",
     "rrcRelease",
     "rrcConnectionRelease",
     "Status: 408",
-    "BYE"
+    "BYE",
+    "UEContextReleaseCommand",
+    "HandoverRequest",
+    "CS domain not available",
+    "user-inactivity",
+    "Radio-connection-with-ue-lost"
   ],
   "critical_ies": [
     "5gmm_cause",
