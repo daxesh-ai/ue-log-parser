@@ -5,23 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 
 try:
-    from PySide6.QtCore import Qt, QThread, Signal, QModelIndex, QSortFilterProxyModel
+    from PySide6.QtCore import Qt, QThread, Signal, QModelIndex, QSortFilterProxyModel, QTimer
     from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
     from PySide6.QtWidgets import (
         QMainWindow, QSplitter, QTableView, QTreeView, QGraphicsView,
         QToolBar, QFileDialog, QProgressBar, QStatusBar, QHeaderView,
         QComboBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-        QStackedWidget, QFrame, QTabWidget, QLineEdit,
+        QStackedWidget, QFrame, QTabWidget, QLineEdit, QMenu, QPlainTextEdit,
     )
 except ImportError:
-    from PyQt6.QtCore import Qt, QThread, QModelIndex, QSortFilterProxyModel
+    from PyQt6.QtCore import Qt, QThread, QModelIndex, QSortFilterProxyModel, QTimer
     from PyQt6.QtCore import pyqtSignal as Signal
     from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent
     from PyQt6.QtWidgets import (
         QMainWindow, QSplitter, QTableView, QTreeView, QGraphicsView,
         QToolBar, QFileDialog, QProgressBar, QStatusBar, QHeaderView,
         QComboBox, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-        QStackedWidget, QFrame, QTabWidget, QLineEdit,
+        QStackedWidget, QFrame, QTabWidget, QLineEdit, QMenu, QPlainTextEdit,
     )
 
 from logparser.core.enums import Protocol, Direction
@@ -29,34 +29,174 @@ from logparser.core.session import LogSession
 from logparser.pipeline import load_file
 
 
+def _format_hex_dump(data: bytes) -> str:
+    """Format raw bytes as XCAL-style L3 hex dump.
+    e.g.  0000  28 13 83 02 00 B8 1E 7E  (....~
+    """
+    if not data:
+        return "  (no payload)"
+    lines = []
+    for i in range(0, len(data), 16):
+        chunk = data[i:i + 16]
+        hex_part = " ".join(f"{b:02X}" for b in chunk)
+        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"  {i:04X}  {hex_part:<47}  {ascii_part}")
+    return "\n".join(lines)
+
+
+class FilterChipBar(QWidget):
+    """XCAL-style filter chip bar — toggle chips for quick protocol/severity filters.
+
+    Multiple chips can be active simultaneously (OR within same group, AND across groups).
+    """
+
+    filters_changed = Signal()
+
+    # chip definitions: (label, group, filter_fn_name, color)
+    _CHIPS = [
+        ("NR RRC",   "proto",    "NR_RRC",    "#2e7d32"),
+        ("LTE RRC",  "proto",    "LTE_RRC",   "#1565C0"),
+        ("NAS",      "proto",    "NAS",       "#6a1b9a"),
+        ("SIP/IMS",  "proto",    "SIP",       "#c62828"),
+        ("MAC-CE",   "channel",  "MAC-CE",    "#795548"),
+        ("Failures", "severity", "FAILURE",   "#e65100"),
+        ("UL",       "dir",      "UL",        "#00695c"),
+        ("DL",       "dir",      "DL",        "#00838f"),
+    ]
+
+    _BTN_ON = (
+        "QPushButton {{ background:{color}; color:white; border:none; "
+        "border-radius:9px; font-size:11px; font-weight:bold; padding:2px 10px; }}"
+        "QPushButton:hover {{ background:{hover}; }}"
+    )
+    _BTN_OFF = (
+        "QPushButton { background:#222; color:#666; border:1px solid #333; "
+        "border-radius:9px; font-size:11px; padding:2px 10px; }"
+        "QPushButton:hover { background:#2a2a2a; color:#aaa; }"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self._active: set[str] = set()   # set of filter keys
+        self._buttons: dict[str, QPushButton] = {}
+
+        for label, group, key, color in self._CHIPS:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedHeight(20)
+            btn.setProperty("filter_key", key)
+            btn.setProperty("chip_color", color)
+            btn.setStyleSheet(self._BTN_OFF)
+            btn.toggled.connect(lambda checked, k=key, b=btn: self._on_toggle(k, b, checked))
+            layout.addWidget(btn)
+            self._buttons[key] = btn
+
+        layout.addStretch()
+
+    def _on_toggle(self, key: str, btn: QPushButton, checked: bool):
+        if checked:
+            self._active.add(key)
+            color = btn.property("chip_color")
+            # Darken hover color slightly
+            btn.setStyleSheet(
+                self._BTN_ON.format(color=color, hover=color)
+            )
+        else:
+            self._active.discard(key)
+            btn.setStyleSheet(self._BTN_OFF)
+        self.filters_changed.emit()
+
+    def active_keys(self) -> set[str]:
+        return set(self._active)
+
+    def clear_all(self):
+        for key, btn in self._buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.setStyleSheet(self._BTN_OFF)
+            btn.blockSignals(False)
+        self._active.clear()
+
+
 class MessageFilterProxyModel(QSortFilterProxyModel):
-    """Proxy that filters message rows by text — searched across Summary, Info, Channel."""
+    """Proxy that filters rows by text search AND active filter chips."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
+        self._chip_keys: set[str] = set()
 
     def set_filter(self, text: str) -> None:
         self._text = text.strip().lower()
         self.invalidateFilter()
 
+    def set_chip_filters(self, keys: set[str]) -> None:
+        self._chip_keys = keys
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
-        if not self._text:
-            return True
         model = self.sourceModel()
         if model is None:
             return True
+
         try:
             role = Qt.ItemDataRole.DisplayRole
         except AttributeError:
             role = Qt.DisplayRole
-        # Search across Protocol, Channel, Summary, Info columns
-        for col in (3, 5, 6, 7):
-            idx = model.index(source_row, col, source_parent)
-            val = model.data(idx, role)
-            if val and self._text in str(val).lower():
-                return True
-        return False
+
+        # ── Chip filters ─────────────────────────────────────────────────────
+        if self._chip_keys:
+            msg = model.get_message(source_row)
+            if msg:
+                proto = msg.protocol.name
+                channel = msg.channel
+                from logparser.core.enums import Severity
+
+                # Protocol chips (OR within protocol group)
+                proto_chips = {"NR_RRC", "LTE_RRC"}
+                nas_chips   = {"NAS"}
+                sip_chips   = {"SIP"}
+                mac_chips   = {"MAC-CE"}
+                fail_chips  = {"FAILURE"}
+                dir_chips   = {"UL", "DL"}
+
+                active_proto = self._chip_keys & (proto_chips | nas_chips | sip_chips | mac_chips)
+                active_fail  = self._chip_keys & fail_chips
+                active_dir   = self._chip_keys & dir_chips
+
+                if active_proto:
+                    match = False
+                    if "NR_RRC"  in active_proto and proto == "NR_RRC":   match = True
+                    if "LTE_RRC" in active_proto and proto == "LTE_RRC":  match = True
+                    if "NAS"     in active_proto and "NAS" in proto:      match = True
+                    if "SIP"     in active_proto and channel == "SIP":    match = True
+                    if "MAC-CE"  in active_proto and channel == "MAC-CE": match = True
+                    if not match:
+                        return False
+
+                if active_fail:
+                    if msg.severity != Severity.FAILURE:
+                        return False
+
+                if active_dir:
+                    dir_val = msg.direction.value.upper()
+                    if not any(d in dir_val for d in active_dir):
+                        return False
+
+        # ── Text search ───────────────────────────────────────────────────────
+        if self._text:
+            for col in (3, 5, 6, 7):
+                idx = model.index(source_row, col, source_parent)
+                val = model.data(idx, role)
+                if val and self._text in str(val).lower():
+                    return True
+            return False
+
+        return True
 
 from .message_list.model import MessageTableModel
 from .ie_tree.model import IETreeModel
@@ -315,7 +455,6 @@ class MainWindow(QMainWindow):
         export_csv_action.triggered.connect(self._export_csv)
 
     def _setup_ui(self):
-        # Stacked widget: page 0 = landing, page 1 = analysis
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
 
@@ -331,8 +470,9 @@ class MainWindow(QMainWindow):
         analysis_widget = QWidget()
         analysis_layout = QVBoxLayout(analysis_widget)
         analysis_layout.setContentsMargins(0, 0, 0, 0)
+        analysis_layout.setSpacing(0)
 
-        # Tech Status Header (RAT mode breadcrumb)
+        # Tech Status Header
         self._tech_header = QLabel("  MODE: -- | VOICE: --")
         self._tech_header.setFixedHeight(28)
         self._tech_header.setStyleSheet(
@@ -341,40 +481,41 @@ class MainWindow(QMainWindow):
         )
         analysis_layout.addWidget(self._tech_header)
 
-        # Toolbar
+        # ── Toolbar Row 1: Open + Export + Search + Progress ──────────────────
         toolbar_widget = QWidget()
         toolbar_layout = QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(8, 4, 8, 4)
+        toolbar_layout.setContentsMargins(8, 3, 8, 3)
+        toolbar_layout.setSpacing(4)
 
         open_btn = QPushButton("Open")
+        open_btn.setFixedHeight(24)
+        open_btn.setStyleSheet(
+            "QPushButton{background:#0066cc;color:white;border-radius:4px;padding:2px 10px;}"
+            "QPushButton:hover{background:#0052a3;}"
+        )
         open_btn.clicked.connect(self._open_file)
         toolbar_layout.addWidget(open_btn)
 
-        toolbar_layout.addSpacing(16)
-        toolbar_layout.addWidget(QLabel("Protocol:"))
-        self._protocol_filter = QComboBox()
-        self._protocol_filter.addItem("All")
-        for p in Protocol:
-            if p != Protocol.UNKNOWN:
-                self._protocol_filter.addItem(p.name, p)
-        toolbar_layout.addWidget(self._protocol_filter)
+        # Export ▾ dropdown button
+        self._export_btn = QPushButton("Export ▾")
+        self._export_btn.setFixedHeight(24)
+        self._export_btn.setStyleSheet(
+            "QPushButton{background:#444;color:white;border-radius:4px;padding:2px 10px;}"
+            "QPushButton:hover{background:#555;}"
+        )
+        self._export_btn.clicked.connect(self._show_export_menu)
+        toolbar_layout.addWidget(self._export_btn)
 
         toolbar_layout.addSpacing(8)
-        toolbar_layout.addWidget(QLabel("Direction:"))
-        self._direction_filter = QComboBox()
-        self._direction_filter.addItem("All")
-        self._direction_filter.addItem("UL", Direction.UL)
-        self._direction_filter.addItem("DL", Direction.DL)
-        toolbar_layout.addWidget(self._direction_filter)
 
-        toolbar_layout.addSpacing(16)
         self._search_box = QLineEdit()
-        self._search_box.setPlaceholderText("Search messages...")
-        self._search_box.setFixedWidth(200)
+        self._search_box.setPlaceholderText("🔍  Search messages...")
+        self._search_box.setFixedHeight(24)
+        self._search_box.setMinimumWidth(200)
         self._search_box.setStyleSheet(
-            "QLineEdit { background: #2a2a2a; color: #ddd; border: 1px solid #444; "
-            "border-radius: 4px; padding: 2px 8px; }"
-            "QLineEdit:focus { border-color: #0066cc; }"
+            "QLineEdit{background:#2a2a2a;color:#ddd;border:1px solid #444;"
+            "border-radius:4px;padding:2px 8px;}"
+            "QLineEdit:focus{border-color:#0066cc;}"
         )
         self._search_box.textChanged.connect(self._on_search_changed)
         toolbar_layout.addWidget(self._search_box)
@@ -382,26 +523,54 @@ class MainWindow(QMainWindow):
         toolbar_layout.addStretch()
 
         self._status_label = QLabel("Ready")
+        self._status_label.setStyleSheet("color:#aaa;font-size:11px;")
         toolbar_layout.addWidget(self._status_label)
 
         self._progress = QProgressBar()
-        self._progress.setMaximumWidth(150)
+        self._progress.setMaximumWidth(130)
+        self._progress.setFixedHeight(16)
         self._progress.hide()
         toolbar_layout.addWidget(self._progress)
 
         analysis_layout.addWidget(toolbar_widget)
 
-        # Tab widget: Signaling | CA & Performance
+        # ── Filter Chip Bar (XCAL Filtering buttons) ──────────────────────────
+        chip_row = QWidget()
+        chip_row.setStyleSheet("background:#1a1a1a;")
+        chip_layout = QHBoxLayout(chip_row)
+        chip_layout.setContentsMargins(8, 2, 8, 2)
+        chip_layout.setSpacing(0)
+
+        chip_label = QLabel("Filter: ")
+        chip_label.setStyleSheet("color:#666;font-size:11px;")
+        chip_layout.addWidget(chip_label)
+
+        self._filter_chips = FilterChipBar()
+        self._filter_chips.filters_changed.connect(self._on_chip_filter_changed)
+        chip_layout.addWidget(self._filter_chips)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(18)
+        clear_btn.setStyleSheet(
+            "QPushButton{background:transparent;color:#666;border:1px solid #333;"
+            "border-radius:3px;font-size:10px;padding:0px 6px;}"
+            "QPushButton:hover{color:#aaa;border-color:#555;}"
+        )
+        clear_btn.clicked.connect(self._clear_all_filters)
+        chip_layout.addWidget(clear_btn)
+
+        analysis_layout.addWidget(chip_row)
+
+        # Tabs
         self._tabs = QTabWidget()
         analysis_layout.addWidget(self._tabs)
 
-        # --- Tab 1: Signaling (3-pane view) ---
+        # --- Tab 1: Signaling ---
         signaling_widget = QWidget()
         sig_layout = QVBoxLayout(signaling_widget)
         sig_layout.setContentsMargins(0, 0, 0, 0)
 
         v_splitter = QSplitter(Qt.Vertical)
-
         h_splitter = QSplitter(Qt.Horizontal)
 
         # Message list
@@ -409,10 +578,12 @@ class MainWindow(QMainWindow):
         self._msg_view.setModel(self._proxy_model)
         self._msg_view.setSelectionBehavior(QTableView.SelectRows)
         self._msg_view.setSelectionMode(QTableView.SingleSelection)
-        self._msg_view.setAlternatingRowColors(True)
+        self._msg_view.setAlternatingRowColors(False)  # we handle colors ourselves
         self._msg_view.verticalHeader().setVisible(False)
         self._msg_view.horizontalHeader().setStretchLastSection(True)
+        self._msg_view.verticalHeader().setDefaultSectionSize(20)
         self._msg_view.setWordWrap(False)
+        self._msg_view.setFont(QFont("Menlo", 10))
         h_splitter.addWidget(self._msg_view)
 
         # Ladder diagram
@@ -424,14 +595,67 @@ class MainWindow(QMainWindow):
         h_splitter.setSizes([700, 400])
         v_splitter.addWidget(h_splitter)
 
+        # IE Tree + Hex panel (stacked in a vertical splitter)
+        ie_container = QWidget()
+        ie_layout = QVBoxLayout(ie_container)
+        ie_layout.setContentsMargins(0, 0, 0, 0)
+        ie_layout.setSpacing(0)
+
+        # Decoded/Hex toggle strip
+        toggle_strip = QWidget()
+        toggle_strip.setStyleSheet("background:#1e1e1e;")
+        toggle_layout = QHBoxLayout(toggle_strip)
+        toggle_layout.setContentsMargins(4, 2, 4, 2)
+        toggle_layout.setSpacing(4)
+
+        self._decoded_btn = QPushButton("Decoded")
+        self._decoded_btn.setCheckable(True)
+        self._decoded_btn.setChecked(True)
+        self._decoded_btn.setFixedHeight(18)
+        self._decoded_btn.setStyleSheet(
+            "QPushButton{background:#1565C0;color:white;border:none;border-radius:3px;"
+            "font-size:10px;padding:0 8px;}"
+            "QPushButton:!checked{background:#2a2a2a;color:#666;}"
+        )
+        self._decoded_btn.toggled.connect(self._on_ie_view_toggle)
+        toggle_layout.addWidget(self._decoded_btn)
+
+        self._hex_btn = QPushButton("L3 Hex")
+        self._hex_btn.setCheckable(True)
+        self._hex_btn.setFixedHeight(18)
+        self._hex_btn.setStyleSheet(
+            "QPushButton{background:#2a2a2a;color:#666;border:none;border-radius:3px;"
+            "font-size:10px;padding:0 8px;}"
+            "QPushButton:checked{background:#333;color:#80cbc4;}"
+        )
+        self._hex_btn.toggled.connect(self._on_hex_view_toggle)
+        toggle_layout.addWidget(self._hex_btn)
+
+        toggle_layout.addStretch()
+        ie_layout.addWidget(toggle_strip)
+
         # IE Tree
         self._ie_view = QTreeView()
         self._ie_view.setModel(self._ie_model)
         self._ie_view.setAlternatingRowColors(True)
         self._ie_view.header().setStretchLastSection(True)
         self._ie_view.setAnimated(False)
-        v_splitter.addWidget(self._ie_view)
+        self._ie_view.setFont(QFont("Menlo", 10))
+        ie_layout.addWidget(self._ie_view)
 
+        # L3 Hex panel (hidden by default)
+        self._hex_view = QPlainTextEdit()
+        self._hex_view.setReadOnly(True)
+        self._hex_view.setFont(QFont("Menlo", 10))
+        self._hex_view.setStyleSheet(
+            "QPlainTextEdit{background:#111;color:#80cbc4;border:none;"
+            "font-family:Menlo,Courier;}"
+        )
+        self._hex_view.setPlaceholderText("Select a message to see raw L3 bytes")
+        self._hex_view.hide()
+        ie_layout.addWidget(self._hex_view)
+
+        v_splitter.addWidget(ie_container)
         v_splitter.setSizes([450, 350])
         sig_layout.addWidget(v_splitter)
 
@@ -448,15 +672,139 @@ class MainWindow(QMainWindow):
 
         self._stack.addWidget(analysis_widget)
 
-        # Status bar
+        # ── XCAL-style status bar ─────────────────────────────────────────────
         self._statusbar = QStatusBar()
+        self._statusbar.setStyleSheet(
+            "QStatusBar{background:#111;color:#666;font-size:11px;}"
+            "QStatusBar::item{border:none;}"
+        )
         self.setStatusBar(self._statusbar)
+
+        self._sb_gps     = QLabel("  No GPS  ")
+        self._sb_logging = QLabel("  No Logging  ")
+        self._sb_cpu     = QLabel("  CPU: --  ")
+        self._sb_memory  = QLabel("  Memory: --  ")
+
+        for lbl in (self._sb_gps, self._sb_logging, self._sb_cpu, self._sb_memory):
+            lbl.setStyleSheet(
+                "color:#888;font-size:11px;padding:0 4px;"
+                "border-left:1px solid #333;"
+            )
+            self._statusbar.addPermanentWidget(lbl)
+
+        # CPU/Memory update timer
+        self._sys_timer = QTimer(self)
+        self._sys_timer.timeout.connect(self._update_sys_stats)
+        self._sys_timer.start(2000)
+        self._update_sys_stats()
 
     def _connect_signals(self):
         self._msg_view.selectionModel().currentRowChanged.connect(self._on_message_selected)
-        self._protocol_filter.currentIndexChanged.connect(self._apply_filters)
-        self._direction_filter.currentIndexChanged.connect(self._apply_filters)
         self._ladder_scene.message_clicked.connect(self._navigate_to_msg)
+
+    # ── New XCAL-style handlers ───────────────────────────────────────────────
+
+    def _show_export_menu(self):
+        """Show Export ▾ dropdown menu."""
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:#2a2a2a;color:#ddd;border:1px solid #444;}"
+            "QMenu::item:selected{background:#0066cc;}"
+        )
+        menu.addAction("Export CSV...",    self._export_csv)
+        menu.addAction("Export JSON...",   self._export_json)
+        menu.addAction("Export Report...", self._export_report)
+        menu.exec(self._export_btn.mapToGlobal(self._export_btn.rect().bottomLeft()))
+
+    def _export_json(self):
+        if not self._session:
+            return
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export JSON", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if filepath:
+            from logparser.export.json_export import export_json
+            export_json(self._session, Path(filepath))
+            self._status_label.setText(f"Exported to {Path(filepath).name}")
+
+    def _export_report(self):
+        if not self._session:
+            return
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Report", "", "HTML (*.html);;PDF (*.pdf);;All Files (*)"
+        )
+        if filepath:
+            from logparser.analysis.recommendations import analyze_session
+            from logparser.export.report_export import export_html_report, export_pdf_report
+            recs = analyze_session(self._session)
+            if filepath.endswith(".pdf"):
+                export_pdf_report(self._session, recs, Path(filepath))
+            else:
+                export_html_report(self._session, recs, Path(filepath))
+            self._status_label.setText(f"Report saved to {Path(filepath).name}")
+
+    def _on_chip_filter_changed(self):
+        """Apply chip filter keys to the proxy model."""
+        keys = self._filter_chips.active_keys()
+        self._proxy_model.set_chip_filters(keys)
+        visible = self._proxy_model.rowCount()
+        total = self._msg_model.rowCount()
+        if keys or self._search_box.text():
+            self._status_label.setText(f"Showing {visible} of {total} messages")
+        elif self._session:
+            self._status_label.setText(
+                f"{self._session.filename} — {len(self._session.messages)} messages"
+            )
+
+    def _clear_all_filters(self):
+        """Clear all chip filters and search box."""
+        self._filter_chips.clear_all()
+        self._search_box.clear()
+        self._proxy_model.set_chip_filters(set())
+        self._proxy_model.set_filter("")
+
+    def _on_ie_view_toggle(self, checked: bool):
+        if checked:
+            self._hex_btn.setChecked(False)
+            self._ie_view.show()
+            self._hex_view.hide()
+            self._decoded_btn.setStyleSheet(
+                "QPushButton{background:#1565C0;color:white;border:none;"
+                "border-radius:3px;font-size:10px;padding:0 8px;}"
+            )
+
+    def _on_hex_view_toggle(self, checked: bool):
+        if checked:
+            self._decoded_btn.setChecked(False)
+            self._ie_view.hide()
+            self._hex_view.show()
+            self._hex_btn.setStyleSheet(
+                "QPushButton{background:#333;color:#80cbc4;border:none;"
+                "border-radius:3px;font-size:10px;padding:0 8px;}"
+            )
+        else:
+            self._decoded_btn.setChecked(True)
+
+    def _update_sys_stats(self):
+        """Update CPU/Memory in status bar every 2 seconds."""
+        try:
+            import psutil
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory().percent
+            self._sb_cpu.setText(f"  CPU: {cpu:.0f}%  ")
+            self._sb_memory.setText(f"  Memory: {mem:.0f}%  ")
+            # Color-code high usage
+            cpu_color = "#f44336" if cpu > 80 else "#ff9800" if cpu > 50 else "#888"
+            mem_color = "#f44336" if mem > 85 else "#ff9800" if mem > 70 else "#888"
+            self._sb_cpu.setStyleSheet(
+                f"color:{cpu_color};font-size:11px;padding:0 4px;border-left:1px solid #333;"
+            )
+            self._sb_memory.setStyleSheet(
+                f"color:{mem_color};font-size:11px;padding:0 4px;border-left:1px solid #333;"
+            )
+        except ImportError:
+            self._sb_cpu.setText("  CPU: N/A  ")
+            self._sb_memory.setText("  Memory: N/A  ")
 
     def _on_search_changed(self, text: str):
         self._proxy_model.set_filter(text)
@@ -509,21 +857,17 @@ class MainWindow(QMainWindow):
         self._progress.hide()
         self._landing.hide_loading()
 
-        # Reset all filters so new file data shows fully
+        # Reset all filters
         self._search_box.blockSignals(True)
         self._search_box.clear()
         self._search_box.blockSignals(False)
         self._proxy_model.set_filter("")
+        self._filter_chips.clear_all()
+        self._proxy_model.set_chip_filters(set())
+        self._msg_model.set_filtered(None)
 
-        self._protocol_filter.blockSignals(True)
-        self._protocol_filter.setCurrentIndex(0)   # "All"
-        self._protocol_filter.blockSignals(False)
-
-        self._direction_filter.blockSignals(True)
-        self._direction_filter.setCurrentIndex(0)  # "All"
-        self._direction_filter.blockSignals(False)
-
-        self._msg_model.set_filtered(None)  # clear any protocol/direction filter
+        # Update status bar logging indicator
+        self._sb_logging.setText(f"  File: {session.filename[:20]}  ")
 
         # Clear IE tree (ladder is cleared inside build_from_session)
         self._ie_model.set_message(None)
@@ -558,7 +902,6 @@ class MainWindow(QMainWindow):
     def _on_message_selected(self, current: QModelIndex, previous: QModelIndex):
         if not current.isValid():
             return
-        # Map proxy row → source row
         source_idx = self._proxy_model.mapToSource(current)
         if not source_idx.isValid():
             return
@@ -566,12 +909,14 @@ class MainWindow(QMainWindow):
         if msg:
             self._ie_model.set_message(msg)
             self._expand_all_tree()
-            # Update tech state header
             self._update_tech_header(msg.index)
-            # Scroll ladder to matching arrow
+
+            # Update L3 hex panel
+            self._hex_view.setPlainText(_format_hex_dump(msg.raw_payload or b""))
+
+            # Scroll ladder
             arrow = self._ladder_scene._arrows.get(msg.index)
             if arrow:
-                # Use the arrow's scene bounding rect centre for accurate scroll
                 rect = arrow.mapToScene(arrow.boundingRect()).boundingRect()
                 self._ladder_view.centerOn(rect.center().x(), rect.center().y())
                 self._ladder_scene.highlight_message(msg.index)
@@ -637,27 +982,9 @@ class MainWindow(QMainWindow):
         self._ie_view.expandAll()
 
     def _apply_filters(self):
+        """Legacy method — filter state now managed by chip bar + proxy model."""
         if not self._session:
             return
-
-        protocols = None
-        directions = None
-
-        proto_data = self._protocol_filter.currentData()
-        if proto_data is not None:
-            protocols = {proto_data}
-
-        dir_data = self._direction_filter.currentData()
-        if dir_data is not None:
-            directions = {dir_data}
-
-        if protocols or directions:
-            filtered = self._session.filter(protocols=protocols, directions=directions)
-            self._msg_model.set_filtered(filtered)
-        else:
-            self._msg_model.set_filtered(None)
-
-        # Proxy may further reduce shown count via text search
         visible = self._proxy_model.rowCount()
         self._status_label.setText(
             f"{self._session.filename} — {visible} messages shown"

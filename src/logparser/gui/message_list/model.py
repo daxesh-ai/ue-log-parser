@@ -4,10 +4,10 @@ from __future__ import annotations
 
 try:
     from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-    from PySide6.QtGui import QColor
+    from PySide6.QtGui import QColor, QFont
 except ImportError:
     from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
-    from PyQt6.QtGui import QColor
+    from PyQt6.QtGui import QColor, QFont
 
 from logparser.core.enums import Severity
 from logparser.core.message import ParsedMessage
@@ -15,28 +15,85 @@ from logparser.core.session import LogSession
 
 COLUMNS = ["RAT", "#", "Timestamp", "Protocol", "Dir", "Channel", "Summary", "Info"]
 
+# ── Severity — used as row background tint on top of protocol color ──────────
 _SEVERITY_COLORS = {
-    Severity.FAILURE: QColor(180, 40, 40),     # Dark red — rejects, timeouts, call drops
-    Severity.WARNING: QColor(180, 120, 30),    # Dark orange — reestablishment, release
-    Severity.INFO: QColor(40, 60, 120),        # Dark blue — info
+    Severity.FAILURE: QColor(180, 40, 40),
+    Severity.WARNING: QColor(180, 120, 30),
+    Severity.INFO:    QColor(40, 60, 120),
 }
 
-# RAT/Tech state → color for the RAT column
-_RAT_COLORS = {
-    "5G SA": QColor(0, 180, 0),         # Green
-    "5G NR": QColor(0, 180, 0),         # Green
-    "5G NSA": QColor(0, 140, 0),        # Dark green
-    "5G NSA (EN-DC)": QColor(0, 140, 0),
-    "LTE": QColor(30, 120, 200),        # Blue
-    "LTE (EPSFB)": QColor(200, 120, 0), # Orange
-    "LTE (Depri)": QColor(200, 50, 50), # Red
-    "WiFi": QColor(0, 180, 220),        # Cyan
-    "WiFi (ePDG)": QColor(0, 180, 220),
-    "VoNR": QColor(0, 200, 0),          # Bright green
-    "VoLTE": QColor(30, 140, 220),      # Blue
-    "VoWiFi": QColor(0, 200, 220),      # Cyan
-    "IMS": QColor(150, 80, 200),        # Purple for IMS/SIP
+# ── Per-protocol row background tints (XCAL-style) ───────────────────────────
+_PROTOCOL_ROW_COLORS = {
+    "NR_RRC":   QColor(0,  55, 25),   # dark green tint
+    "LTE_RRC":  QColor(0,  25, 75),   # dark blue tint
+    "NR_NAS":   QColor(25, 50, 75),   # blue-green
+    "LTE_NAS":  QColor(0,  45, 65),   # teal
+    "S1AP":     QColor(45, 25, 75),   # purple
+    "NGAP":     QColor(55, 25, 75),   # purple
+    "SIP":      QColor(65, 15, 55),   # magenta/pink
+    "UNKNOWN":  QColor(30, 30, 30),   # near-black for MAC-CE etc.
 }
+
+# Severity overlay: adds these RGB deltas to the protocol color
+_SEVERITY_OVERLAY = {
+    Severity.FAILURE: (120, -20, -20),   # push red up
+    Severity.WARNING: (100,  40, -30),   # push orange
+}
+
+# ── RAT chip colors ───────────────────────────────────────────────────────────
+_RAT_COLORS = {
+    "5G SA": QColor(0, 180, 0),
+    "5G NR": QColor(0, 180, 0),
+    "5G NSA": QColor(0, 140, 0),
+    "5G NSA (EN-DC)": QColor(0, 140, 0),
+    "LTE": QColor(30, 120, 200),
+    "LTE (EPSFB)": QColor(200, 120, 0),
+    "LTE (Depri)": QColor(200, 50, 50),
+    "WiFi": QColor(0, 180, 220),
+    "WiFi (ePDG)": QColor(0, 180, 220),
+    "VoNR":  QColor(0, 200, 0),
+    "VoLTE": QColor(30, 140, 220),
+    "VoWiFi": QColor(0, 200, 220),
+    "IMS":   QColor(150, 80, 200),
+}
+
+# ── Protocol prefix labels (XCAL vH20 / vH40 style) ─────────────────────────
+_PROTOCOL_PREFIX = {
+    "NR_RRC":  "5GNR ",
+    "LTE_RRC": "LTE ",
+    "NR_NAS":  "5GMM ",
+    "LTE_NAS": "EPS ",
+    "S1AP":    "S1AP ",
+    "NGAP":    "NGAP ",
+    "SIP":     "SIP ",
+}
+
+# ── String color highlighting (XCAL String Color Setting) ────────────────────
+# Maps lowercase keyword → foreground QColor for Summary column
+STRING_COLORS: dict[str, QColor] = {
+    "handover":       QColor(255, 220, 50),   # yellow
+    "reject":         QColor(255, 100, 100),  # red
+    "deprioritised":  QColor(255, 160, 0),    # orange
+    "srvcc":          QColor(0,   220, 220),  # cyan
+    "failure":        QColor(255, 100, 100),  # red
+    "failed":         QColor(255, 100, 100),  # red
+    "reestablishment":QColor(255, 160, 80),   # orange
+    "release":        QColor(180, 180, 180),  # light gray
+    "rrcsetup":       QColor(120, 220, 120),  # light green
+    "registration":   QColor(120, 200, 255),  # light blue
+    "vonr":           QColor(100, 255, 100),  # bright green
+    "volte":          QColor(80,  160, 255),  # blue
+    "vowifi":         QColor(0,   220, 220),  # cyan
+    "scgfailure":     QColor(255, 80,  80),   # red
+}
+
+
+def _blend_color(base: QColor, overlay: tuple[int, int, int]) -> QColor:
+    """Clamp-blend RGB delta onto base color."""
+    r = max(0, min(255, base.red()   + overlay[0]))
+    g = max(0, min(255, base.green() + overlay[1]))
+    b = max(0, min(255, base.blue()  + overlay[2]))
+    return QColor(r, g, b)
 
 
 class MessageTableModel(QAbstractTableModel):
@@ -75,7 +132,6 @@ class MessageTableModel(QAbstractTableModel):
         return None
 
     def row_for_index(self, msg_index: int) -> int:
-        """Find the row number for a given message index, or -1 if not visible."""
         for row, msg in enumerate(self._messages):
             if msg.index == msg_index:
                 return row
@@ -99,9 +155,9 @@ class MessageTableModel(QAbstractTableModel):
         msg = self._messages[index.row()]
         col = index.column()
 
+        # ── Display ───────────────────────────────────────────────────────────
         if role == Qt.DisplayRole:
             if col == 0:
-                # RAT column — show short tech label
                 return self._get_rat_label(msg.index)
             elif col == 1:
                 return msg.index
@@ -114,26 +170,62 @@ class MessageTableModel(QAbstractTableModel):
             elif col == 5:
                 return self._get_channel_display(msg)
             elif col == 6:
-                return msg.summary
+                # XCAL-style: prepend protocol version prefix
+                prefix = _PROTOCOL_PREFIX.get(msg.protocol.name, "")
+                return prefix + msg.summary
             elif col == 7:
                 return msg.info
 
+        # ── Background — protocol tint + severity overlay ────────────────────
         elif role == Qt.BackgroundRole:
-            # RAT column gets colored background
             if col == 0:
                 return self._get_rat_color(msg.index)
-            # Severity colors for other columns
-            color = _SEVERITY_COLORS.get(msg.severity)
-            if color:
-                return color
 
+            # Protocol base color
+            proto_name = msg.protocol.name
+            # MAC-CE and other non-protocol messages
+            if msg.channel == "MAC-CE":
+                base = QColor(45, 35, 0)   # dark amber for MAC-CE
+            elif msg.channel in ("S1AP", "PFCP", "GTP", "Diameter", "NGAP"):
+                base = _PROTOCOL_ROW_COLORS.get(msg.channel,
+                       _PROTOCOL_ROW_COLORS.get(proto_name,
+                       _PROTOCOL_ROW_COLORS["UNKNOWN"]))
+            else:
+                base = _PROTOCOL_ROW_COLORS.get(proto_name,
+                       _PROTOCOL_ROW_COLORS["UNKNOWN"])
+
+            # Severity overlay
+            overlay = _SEVERITY_OVERLAY.get(msg.severity)
+            if overlay:
+                return _blend_color(base, overlay)
+            return base
+
+        # ── Foreground ────────────────────────────────────────────────────────
         elif role == Qt.ForegroundRole:
             if col == 0:
-                return QColor(255, 255, 255)  # White text on colored RAT cell
-            # Highlight SRB3 channel column in magenta
+                return QColor(255, 255, 255)
             if col == 5 and msg.bearer_id == 3:
-                return QColor(255, 100, 255)  # Magenta for SRB3
+                return QColor(255, 100, 255)   # SRB3 magenta
+            # String color highlighting for Summary column
+            if col == 6:
+                summary_lower = (msg.summary or "").lower()
+                for keyword, color in STRING_COLORS.items():
+                    if keyword in summary_lower:
+                        return color
+            # Failure text: bright red; Warning: bright orange
+            if msg.severity == Severity.FAILURE:
+                return QColor(255, 140, 140)
+            elif msg.severity == Severity.WARNING:
+                return QColor(255, 200, 100)
 
+        # ── Font — bold for failures ──────────────────────────────────────────
+        elif role == Qt.FontRole:
+            if msg.severity == Severity.FAILURE:
+                f = QFont()
+                f.setBold(True)
+                return f
+
+        # ── Tooltip ───────────────────────────────────────────────────────────
         elif role == Qt.ToolTipRole:
             parts = []
             if msg.bearer_id == 3:
@@ -143,11 +235,13 @@ class MessageTableModel(QAbstractTableModel):
             if msg.info:
                 parts.append(msg.info)
             if msg.pci:
-                parts.append(f"Sub-header PCI: {msg.pci}")
+                parts.append(f"PCI: {msg.pci}")
             if msg.arfcn:
-                parts.append(f"Sub-header ARFCN: {msg.arfcn}")
+                parts.append(f"ARFCN: {msg.arfcn}")
             if msg.bearer_id >= 0:
-                srb_name = {0: "SRB0", 1: "SRB1", 2: "SRB2", 3: "SRB3"}.get(msg.bearer_id, f"RB{msg.bearer_id}")
+                srb_name = {0: "SRB0", 1: "SRB1", 2: "SRB2", 3: "SRB3"}.get(
+                    msg.bearer_id, f"RB{msg.bearer_id}"
+                )
                 parts.append(f"Bearer: {srb_name}")
             return "\n".join(parts) if parts else None
 
@@ -155,7 +249,6 @@ class MessageTableModel(QAbstractTableModel):
 
     @staticmethod
     def _get_channel_display(msg: ParsedMessage) -> str:
-        """Format channel with SRB indicator for NR RRC messages."""
         if msg.bearer_id >= 0 and msg.protocol.name == "NR_RRC":
             srb_name = {0: "SRB0", 1: "SRB1", 2: "SRB2", 3: "SRB3"}.get(msg.bearer_id)
             if srb_name:
@@ -163,58 +256,35 @@ class MessageTableModel(QAbstractTableModel):
         return msg.channel
 
     def _get_rat_label(self, msg_index: int) -> str:
-        """Get short RAT label for display."""
         if not self._tech_tracker:
             return ""
         state = self._tech_tracker.get_state_at(msg_index)
         tech = state.tech
         voice = state.voice
 
-        # Prefer voice state if active
         if voice and voice != "Idle":
-            if "VoNR" in voice:
-                return "VoNR"
-            elif "VoLTE" in voice:
-                return "VoLTE"
-            elif "VoWiFi" in voice:
-                return "VoWiFi"
-            elif "EPSFB" in voice:
-                return "EPSFB"
-            elif "IMS" in voice or "Call" in voice:
-                return "IMS"
+            if "VoNR"  in voice: return "VoNR"
+            if "VoLTE" in voice: return "VoLTE"
+            if "VoWiFi"in voice: return "VoWiFi"
+            if "EPSFB" in voice: return "EPSFB"
+            if "IMS"   in voice or "Call" in voice: return "IMS"
 
-        # Tech state
-        if "5G SA" in tech or "5G NR" in tech:
-            return "NR"
-        elif "NSA" in tech or "EN-DC" in tech:
-            return "NSA"
-        elif "WiFi" in tech or "ePDG" in tech:
-            return "WiFi"
-        elif "EPSFB" in tech:
-            return "EPSFB"
-        elif "Depri" in tech:
-            return "Depri"
-        elif "LTE" in tech:
-            return "LTE"
+        if "5G SA" in tech or "5G NR" in tech: return "NR"
+        if "NSA"   in tech or "EN-DC" in tech: return "NSA"
+        if "WiFi"  in tech or "ePDG"  in tech: return "WiFi"
+        if "EPSFB" in tech: return "EPSFB"
+        if "Depri" in tech: return "Depri"
+        if "LTE"   in tech: return "LTE"
         return ""
 
     def _get_rat_color(self, msg_index: int) -> QColor | None:
-        """Get background color for RAT column."""
         if not self._tech_tracker:
             return None
         state = self._tech_tracker.get_state_at(msg_index)
-        tech = state.tech
-        voice = state.voice
-
-        # Voice states take priority for color
-        if voice and voice != "Idle":
-            for key, color in _RAT_COLORS.items():
-                if key in voice:
-                    return color
-
-        # Tech states
         for key, color in _RAT_COLORS.items():
-            if key in tech:
+            if key in state.voice and state.voice != "Idle":
                 return color
-
-        return QColor(60, 60, 60)  # Dark gray for unknown
+        for key, color in _RAT_COLORS.items():
+            if key in state.tech:
+                return color
+        return QColor(60, 60, 60)
