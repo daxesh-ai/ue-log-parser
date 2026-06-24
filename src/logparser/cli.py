@@ -39,6 +39,8 @@ Examples:
                         help="Export Top-20 issues report (.html or .pdf)")
     parser.add_argument("--train-model", action="store_true",
                         help="Train ML anomaly model from provided session files")
+    parser.add_argument("--live", metavar="[HOST:]PORT",
+                        help="Live mode: listen for QXDM UDP packets (e.g. --live :4000)")
     parser.add_argument("--dir", type=Path, metavar="DIR",
                         help="Batch mode: process all .hdf/.pcap files in DIR")
 
@@ -58,6 +60,11 @@ Examples:
     # ML model training mode
     if getattr(args, "train_model", False):
         _train_ml_model(args)
+        return
+
+    # Live QXDM UDP streaming mode
+    if getattr(args, "live", None):
+        _live_mode(args)
         return
 
     for f in args.files:
@@ -229,6 +236,62 @@ def _print_recommendations_json(recs) -> None:
             "parameter": r.parameter,
         })
     print(json.dumps(output, indent=2))
+
+
+def _live_mode(args):
+    """Stream real-time QXDM packets from UDP socket."""
+    from logparser.ingest.live_reader import LiveReader, parse_host_port
+    from logparser.pipeline import _REGISTRY, _build_registry
+    from logparser.decoders.info_extractor import extract_info
+    from logparser.core.message import ParsedMessage
+    from logparser.core.enums import Direction, Severity
+
+    global _REGISTRY
+    if not _REGISTRY:
+        _REGISTRY = _build_registry()
+
+    try:
+        host, port = parse_host_port(args.live)
+    except ValueError:
+        print(f"Error: invalid address '{args.live}'. Use format :4000 or host:4000", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Listening for QXDM packets on {host}:{port} ...", file=sys.stderr)
+    print(f"Press Ctrl+C to stop.\n", file=sys.stderr)
+    print(f"{'Time':<13} {'Proto':<9} {'Dir':<4} {'Channel':<14} {'Summary'}")
+    print(f"{'-'*13} {'-'*9} {'-'*4} {'-'*14} {'-'*40}")
+
+    reader = LiveReader(host=host, port=port, timeout_sec=60.0)
+    msg_count = 0
+
+    try:
+        for packet in reader.read_packets():
+            if packet.log_code not in _REGISTRY:
+                continue
+
+            stripper, decoder, protocol = _REGISTRY[packet.log_code]
+            stripped = stripper.strip(packet.payload)
+            if stripped is None:
+                continue
+
+            result = decoder.decode(stripped.pdu, stripped.channel, stripped.direction)
+            if result is None:
+                continue
+
+            info = extract_info(result.decoded_tree, result.summary)
+            ts = packet.timestamp.strftime("%H:%M:%S.%f")[:-3]
+            print(
+                f"{ts:<13} {result.protocol.name:<9} "
+                f"{result.direction.value:<4} {result.channel:<14} "
+                f"{result.summary}"
+            )
+            if info:
+                print(f"             {' ':9} {' ':4} {' ':14} → {info}")
+
+            msg_count += 1
+
+    except KeyboardInterrupt:
+        print(f"\nStopped. Decoded {msg_count} messages.", file=sys.stderr)
 
 
 def _train_ml_model(args):

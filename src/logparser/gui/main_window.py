@@ -231,11 +231,78 @@ class LoaderThread(QThread):
         self.progress.emit(current, total)
 
 
+class LiveCaptureThread(QThread):
+    """Background thread for live QXDM UDP capture — streams decoded messages."""
+
+    message_received = Signal(object)  # emits ParsedMessage
+    error = Signal(str)
+    stopped = Signal(int)  # emits total message count
+
+    def __init__(self, host: str, port: int, parent=None):
+        super().__init__(parent)
+        self._host = host
+        self._port = port
+        self._reader = None
+        self._count = 0
+
+    def stop(self):
+        if self._reader:
+            self._reader.stop()
+
+    def run(self):
+        from logparser.ingest.live_reader import LiveReader
+        from logparser.pipeline import _REGISTRY, _build_registry
+        from logparser.decoders.info_extractor import extract_info
+        from logparser.core.message import ParsedMessage
+        from logparser.core.enums import Severity
+
+        global _REGISTRY
+        if not _REGISTRY:
+            _REGISTRY = _build_registry()
+
+        self._reader = LiveReader(host=self._host, port=self._port, timeout_sec=300)
+        try:
+            for packet in self._reader.read_packets():
+                if packet.log_code not in _REGISTRY:
+                    continue
+                stripper, decoder, protocol = _REGISTRY[packet.log_code]
+                stripped = stripper.strip(packet.payload)
+                if stripped is None:
+                    continue
+                result = decoder.decode(stripped.pdu, stripped.channel, stripped.direction)
+                if result is None:
+                    continue
+                info = extract_info(result.decoded_tree, result.summary)
+                msg = ParsedMessage(
+                    index=self._count,
+                    timestamp=packet.timestamp,
+                    protocol=result.protocol,
+                    direction=result.direction,
+                    channel=result.channel,
+                    summary=result.summary,
+                    raw_payload=stripped.pdu,
+                    decoded_tree=result.decoded_tree,
+                    decoded_text=result.decoded_text,
+                    source_entity=result.source_entity,
+                    target_entity=result.target_entity,
+                    pci=stripped.pci,
+                    arfcn=stripped.arfcn,
+                    bearer_id=stripped.bearer_id,
+                    info=info,
+                )
+                self._count += 1
+                self.message_received.emit(msg)
+        except Exception as e:
+            self.error.emit(str(e))
+        self.stopped.emit(self._count)
+
+
 class LandingPage(QWidget):
     """Landing page with file upload options."""
 
     file_selected = Signal(str)
     files_selected = Signal(list)  # list of str paths (multi-file)
+    live_requested = Signal(str, int)  # host, port
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -345,6 +412,16 @@ class LandingPage(QWidget):
         open_multi_btn.clicked.connect(self._open_multiple)
         btn_layout.addWidget(open_multi_btn)
 
+        live_btn = QPushButton("⚡ Live Capture")
+        live_btn.setFixedSize(160, 40)
+        live_btn.setStyleSheet(
+            "QPushButton { background: #cc5500; color: white; border-radius: 6px; "
+            "font-size: 14px; font-weight: bold; }"
+            "QPushButton:hover { background: #aa4400; }"
+        )
+        live_btn.clicked.connect(self._open_live)
+        btn_layout.addWidget(live_btn)
+
         drop_layout.addLayout(btn_layout)
 
         layout.addWidget(drop_frame)
@@ -398,6 +475,24 @@ class LandingPage(QWidget):
         )
         if folder:
             self.file_selected.emit(folder)
+
+    def _open_live(self):
+        """Prompt for UDP port and start live capture."""
+        try:
+            from PySide6.QtWidgets import QInputDialog
+        except ImportError:
+            from PyQt6.QtWidgets import QInputDialog
+        port_str, ok = QInputDialog.getText(
+            self, "Live QXDM Capture",
+            "UDP port to listen on (e.g. 4000):",
+            text="4000",
+        )
+        if ok and port_str.strip():
+            try:
+                port = int(port_str.strip())
+                self.live_requested.emit("0.0.0.0", port)
+            except ValueError:
+                pass
 
     def _open_multiple(self):
         filepaths, _ = QFileDialog.getOpenFileNames(
@@ -464,6 +559,9 @@ class MainWindow(QMainWindow):
         self._landing.files_selected.connect(
             lambda fps: self._load_file([Path(fp) for fp in fps])
         )
+        self._landing.live_requested.connect(self._start_live_capture)
+        self._live_thread: LiveCaptureThread | None = None
+        self._live_session = None
         self._stack.addWidget(self._landing)
 
         # --- Page 1: Analysis View ---
@@ -893,6 +991,71 @@ class MainWindow(QMainWindow):
         self._recs_tab.load_session(session)
 
         self.setWindowTitle(f"5G/4G Log Parser — {session.filename}")
+
+    def _start_live_capture(self, host: str, port: int):
+        """Start live QXDM UDP capture session."""
+        from logparser.core.session import LogSession
+
+        # Stop any existing live capture
+        if self._live_thread and self._live_thread.isRunning():
+            self._live_thread.stop()
+            self._live_thread.wait(1000)
+
+        # Initialize a fresh session
+        self._live_session = LogSession(filename=f"Live:{host}:{port}")
+        self._msg_model.set_session(self._live_session)
+        self._proxy_model.set_filter("")
+        self._filter_chips.clear_all()
+        self._ie_model.set_message(None)
+        self._stack.setCurrentIndex(1)
+        self._sb_logging.setText(f"  ⚡ Live :{port}  ")
+        self._sb_logging.setStyleSheet(
+            "color:#ff9800;font-size:11px;padding:0 4px;border-left:1px solid #333;"
+        )
+        self.setWindowTitle(f"5G/4G Log Parser — Live Capture :{port}")
+
+        self._live_thread = LiveCaptureThread(host, port, self)
+        self._live_thread.message_received.connect(self._on_live_message)
+        self._live_thread.error.connect(self._on_live_error)
+        self._live_thread.stopped.connect(self._on_live_stopped)
+        self._live_thread.start()
+
+    def _on_live_message(self, msg):
+        """Append a decoded live message to the session and refresh view."""
+        if self._live_session is None:
+            return
+        msg.index = len(self._live_session.messages)
+        self._live_session.messages.append(msg)
+        # Efficient: just insert one row rather than reset model
+        self._msg_model.beginInsertRows(
+            self._msg_model.index(0, 0).parent(),
+            len(self._live_session.messages) - 1,
+            len(self._live_session.messages) - 1,
+        )
+        self._msg_model.endInsertRows()
+        # Auto-scroll to latest
+        last_row = self._proxy_model.rowCount() - 1
+        if last_row >= 0:
+            idx = self._proxy_model.index(last_row, 0)
+            self._msg_view.scrollTo(idx)
+        self._status_label.setText(
+            f"Live :{self._live_thread._port if self._live_thread else ''} — "
+            f"{len(self._live_session.messages)} messages"
+        )
+
+    def _on_live_error(self, error_msg: str):
+        self._status_label.setText(f"Live capture error: {error_msg}")
+        self._sb_logging.setText("  No Logging  ")
+        self._sb_logging.setStyleSheet(
+            "color:#888;font-size:11px;padding:0 4px;border-left:1px solid #333;"
+        )
+
+    def _on_live_stopped(self, count: int):
+        self._status_label.setText(f"Live capture stopped — {count} messages decoded")
+        self._sb_logging.setText("  No Logging  ")
+        self._sb_logging.setStyleSheet(
+            "color:#888;font-size:11px;padding:0 4px;border-left:1px solid #333;"
+        )
 
     def _on_load_error(self, error_msg: str):
         self._progress.hide()
