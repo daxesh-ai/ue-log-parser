@@ -604,6 +604,17 @@ class MainWindow(QMainWindow):
         self._export_btn.clicked.connect(self._show_export_menu)
         toolbar_layout.addWidget(self._export_btn)
 
+        str_color_btn = QPushButton("String Color")
+        str_color_btn.setFixedHeight(24)
+        str_color_btn.setToolTip("String Color Setting — XCAL-style keyword color configuration")
+        str_color_btn.setStyleSheet(
+            "QPushButton{background:#2a2a2a;color:#aaa;border:1px solid #444;"
+            "border-radius:4px;padding:2px 8px;font-size:11px;}"
+            "QPushButton:hover{background:#333;color:#ddd;}"
+        )
+        str_color_btn.clicked.connect(self._show_string_color_dialog)
+        toolbar_layout.addWidget(str_color_btn)
+
         toolbar_layout.addSpacing(8)
 
         self._search_box = QLineEdit()
@@ -801,6 +812,17 @@ class MainWindow(QMainWindow):
         self._ladder_scene.message_clicked.connect(self._navigate_to_msg)
 
     # ── New XCAL-style handlers ───────────────────────────────────────────────
+
+    def _show_string_color_dialog(self):
+        """Open the String Color Setting dialog (XCAL-style keyword color editor)."""
+        from logparser.gui.string_color_dialog import StringColorDialog
+        dlg = StringColorDialog(self)
+        dlg.colors_changed.connect(self._refresh_message_colors)
+        dlg.exec()
+
+    def _refresh_message_colors(self):
+        """Repaint message list after string colors changed."""
+        self._msg_model.layoutChanged.emit()
 
     def _show_export_menu(self):
         """Show Export ▾ dropdown menu."""
